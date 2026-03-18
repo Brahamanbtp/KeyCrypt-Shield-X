@@ -51,6 +51,8 @@ grpcio-tools = "^1.71.0"
 protobuf = "^5.29.3"
 click = "^8.1.8"
 rich = "^13.9.4"
+zstandard = "^0.23.0"
+brotli = "^1.1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
