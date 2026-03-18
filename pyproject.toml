@@ -49,6 +49,8 @@ redis = "^5.2.1"
 grpcio = "^1.71.0"
 grpcio-tools = "^1.71.0"
 protobuf = "^5.29.3"
+click = "^8.1.8"
+rich = "^13.9.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
@@ -57,7 +59,8 @@ mypy = "^1.15.0"
 ruff = "^0.11.0"
 
 [tool.poetry.scripts]
-keycrypt-shield-x = "keycrypt_shield_x.cli:main"
+keycrypt = "src.cli.main:main"
+keycrypt-shield-x = "src.cli.main:main"
 
 [tool.black]
 line-length = 100
