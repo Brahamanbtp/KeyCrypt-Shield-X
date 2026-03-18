@@ -1,0 +1,720 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "KeyCrypt Shield X API",
+    "description": "REST API for encryption, key lifecycle, and security operations.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/auth/token": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issue Token",
+        "operationId": "issue_token_auth_token_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/encrypt": {
+      "post": {
+        "tags": [
+          "crypto"
+        ],
+        "summary": "Encrypt File",
+        "operationId": "encrypt_file_encrypt_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "algorithm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "AES-256-GCM",
+              "title": "Algorithm"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_encrypt_file_encrypt_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EncryptResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/decrypt": {
+      "post": {
+        "tags": [
+          "crypto"
+        ],
+        "summary": "Decrypt File",
+        "operationId": "decrypt_file_decrypt_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecryptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/keys/generate": {
+      "post": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Generate Key",
+        "operationId": "generate_key_keys_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateKeyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/keys/{key_id}": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Get Key Metadata",
+        "operationId": "get_key_metadata_keys__key_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Key Metadata Keys  Key Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/keys/{key_id}/rotate": {
+      "post": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Rotate Key",
+        "operationId": "rotate_key_keys__key_id__rotate_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateKeyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Status",
+        "operationId": "status_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Metrics Endpoint",
+        "operationId": "metrics_endpoint_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_encrypt_file_encrypt_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_encrypt_file_encrypt_post"
+      },
+      "DecryptRequest": {
+        "properties": {
+          "encrypted_file_b64": {
+            "type": "string",
+            "title": "Encrypted File B64"
+          },
+          "key_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key B64"
+          },
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "nonce_b64": {
+            "type": "string",
+            "title": "Nonce B64"
+          },
+          "aad": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aad"
+          }
+        },
+        "type": "object",
+        "required": [
+          "encrypted_file_b64",
+          "nonce_b64"
+        ],
+        "title": "DecryptRequest"
+      },
+      "DecryptResponse": {
+        "properties": {
+          "plaintext_b64": {
+            "type": "string",
+            "title": "Plaintext B64"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plaintext_b64",
+          "metadata"
+        ],
+        "title": "DecryptResponse"
+      },
+      "EncryptResponse": {
+        "properties": {
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "algorithm": {
+            "type": "string",
+            "title": "Algorithm"
+          },
+          "encrypted_file_b64": {
+            "type": "string",
+            "title": "Encrypted File B64"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "algorithm",
+          "encrypted_file_b64",
+          "metadata"
+        ],
+        "title": "EncryptResponse"
+      },
+      "GenerateKeyRequest": {
+        "properties": {
+          "algorithm": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Algorithm",
+            "default": "AES-256-GCM"
+          }
+        },
+        "type": "object",
+        "title": "GenerateKeyRequest"
+      },
+      "GenerateKeyResponse": {
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          },
+          "algorithm": {
+            "type": "string",
+            "title": "Algorithm"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "public_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Public Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key_id",
+          "algorithm",
+          "created_at",
+          "expires_at",
+          "public_metadata"
+        ],
+        "title": "GenerateKeyResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "RotateKeyRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "RotateKeyRequest"
+      },
+      "RotateKeyResponse": {
+        "properties": {
+          "old_key_id": {
+            "type": "string",
+            "title": "Old Key Id"
+          },
+          "new_key_id": {
+            "type": "string",
+            "title": "New Key Id"
+          },
+          "algorithm": {
+            "type": "string",
+            "title": "Algorithm"
+          },
+          "revoked_reason": {
+            "type": "string",
+            "title": "Revoked Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "old_key_id",
+          "new_key_id",
+          "algorithm",
+          "revoked_reason"
+        ],
+        "title": "RotateKeyResponse"
+      },
+      "StatusResponse": {
+        "properties": {
+          "health": {
+            "type": "string",
+            "title": "Health"
+          },
+          "timestamp": {
+            "type": "number",
+            "title": "Timestamp"
+          },
+          "security_state": {
+            "type": "string",
+            "title": "Security State"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics"
+          }
+        },
+        "type": "object",
+        "required": [
+          "health",
+          "timestamp",
+          "security_state",
+          "metrics"
+        ],
+        "title": "StatusResponse"
+      },
+      "TokenRequest": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "TokenRequest"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer"
+          },
+          "expires_at": {
+            "type": "number",
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_at"
+        ],
+        "title": "TokenResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
