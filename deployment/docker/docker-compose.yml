@@ -1,0 +1,185 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+    image: keycrypt-shield-x:latest
+    container_name: keycrypt-api
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PORT: ${API_PORT:-8000}
+      KEYCRYPT_DB_HOST: postgres
+      KEYCRYPT_DB_PORT: 5432
+      KEYCRYPT_DB_NAME: ${POSTGRES_DB:-keycrypt}
+      KEYCRYPT_DB_USER: ${POSTGRES_USER:-keycrypt}
+      KEYCRYPT_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycrypt_password}
+      KEYCRYPT_REDIS_HOST: redis
+      KEYCRYPT_REDIS_PORT: 6379
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - keycrypt_data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - backend
+      - observability
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1024M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: keycrypt-postgres
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-keycrypt}
+      POSTGRES_USER: ${POSTGRES_USER:-keycrypt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keycrypt_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keycrypt} -d ${POSTGRES_DB:-keycrypt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1024M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    container_name: keycrypt-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: keycrypt-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - observability
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 768M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: keycrypt-grafana
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - observability
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 768M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+networks:
+  backend:
+    driver: bridge
+  observability:
+    driver: bridge
+
+volumes:
+  keycrypt_data:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
