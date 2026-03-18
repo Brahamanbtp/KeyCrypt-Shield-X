@@ -1,0 +1,47 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+.env
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing and coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Secrets and sensitive files
+*.key
+*.pem
+secrets.yaml
+.env.local
+
+# Data and databases
+*.db
+*.sqlite
+data/
+datasets/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Quantum simulators
+qiskit_cache/
+
