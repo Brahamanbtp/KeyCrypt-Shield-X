@@ -1,0 +1,362 @@
+{
+  "info": {
+    "name": "KeyCrypt Shield X API",
+    "description": "REST API for encryption, key lifecycle, and security operations.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "0.1.0"
+  },
+  "item": [
+    {
+      "name": "POST /auth/token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/auth/token",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "auth",
+            "token"
+          ]
+        },
+        "description": "Issue Token",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"string\",\n  \"password\": \"string\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"access_token\": \"string\",\n  \"token_type\": \"string\",\n  \"expires_at\": 0.0\n}"
+        }
+      ]
+    },
+    {
+      "name": "POST /decrypt",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/decrypt",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "decrypt"
+          ]
+        },
+        "description": "Decrypt File",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"encrypted_file_b64\": \"string\",\n  \"key_b64\": \"string\",\n  \"key_id\": \"string\",\n  \"nonce_b64\": \"string\",\n  \"aad\": \"string\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"plaintext_b64\": \"string\",\n  \"metadata\": {}\n}"
+        }
+      ]
+    },
+    {
+      "name": "POST /encrypt",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/encrypt",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "encrypt"
+          ]
+        },
+        "description": "Encrypt File",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"file\": \"string\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"key_id\": \"string\",\n  \"algorithm\": \"string\",\n  \"encrypted_file_b64\": \"string\",\n  \"metadata\": {}\n}"
+        }
+      ]
+    },
+    {
+      "name": "POST /keys/generate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/keys/generate",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "keys",
+            "generate"
+          ]
+        },
+        "description": "Generate Key",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"algorithm\": \"string\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"key_id\": \"string\",\n  \"algorithm\": \"string\",\n  \"created_at\": 0.0,\n  \"expires_at\": 0.0,\n  \"public_metadata\": {}\n}"
+        }
+      ]
+    },
+    {
+      "name": "GET /keys/{key_id}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/keys/{key_id}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "keys",
+            "{key_id}"
+          ]
+        },
+        "description": "Get Key Metadata"
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{}"
+        }
+      ]
+    },
+    {
+      "name": "POST /keys/{key_id}/rotate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/keys/{key_id}/rotate",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "keys",
+            "{key_id}",
+            "rotate"
+          ]
+        },
+        "description": "Rotate Key",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reason\": \"string\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"old_key_id\": \"string\",\n  \"new_key_id\": \"string\",\n  \"algorithm\": \"string\",\n  \"revoked_reason\": \"string\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "GET /metrics",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/metrics",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "metrics"
+          ]
+        },
+        "description": "Metrics Endpoint"
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"message\": \"No schema available\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "GET /status",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer <token>"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/status",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "status"
+          ]
+        },
+        "description": "Status"
+      },
+      "response": [
+        {
+          "name": "Example Response",
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "body": "{\n  \"health\": \"string\",\n  \"timestamp\": 0.0,\n  \"security_state\": \"string\",\n  \"metrics\": {}\n}"
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    }
+  ]
+}
