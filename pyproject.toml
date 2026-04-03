@@ -56,6 +56,9 @@ zstandard = "^0.23.0"
 brotli = "^1.1.0"
 lz4 = "^4.3.3"
 dependency-injector = "^4.46.0"
+aioboto3 = "^13.1.1"
+azure-storage-blob = "^12.25.1"
+google-cloud-storage = "^2.19.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
