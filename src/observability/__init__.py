@@ -33,6 +33,12 @@ from .compliance_reporter import (
     SOC2Report,
     SignedPDFArtifact,
 )
+from .compliance_validator import (
+    ComplianceResult,
+    ComplianceValidator,
+    ComplianceViolationError,
+    Operation,
+)
 
 # Optional compatibility bridge so callers can continue using monitoring
 # modules while importing from the observability namespace.
@@ -79,6 +85,10 @@ __all__ = [
     "SOC2Report",
     "PCIDSSReport",
     "ComplianceReporter",
+    "Operation",
+    "ComplianceResult",
+    "ComplianceViolationError",
+    "ComplianceValidator",
     "monitoring_metrics",
     "monitoring_security_events",
     "monitoring_telemetry",
