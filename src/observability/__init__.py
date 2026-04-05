@@ -7,6 +7,13 @@ single import surface for newer observability components.
 from __future__ import annotations
 
 from .audit_ledger import ImmutableAuditLedger
+from .audit_event_schema import (
+    AccessEvent,
+    AuditEvent,
+    ConfigChangeEvent,
+    EncryptionEvent,
+    KeyRotationEvent,
+)
 from .distributed_tracing import setup_tracing
 from .structured_logging import StructuredLogger
 
@@ -37,6 +44,11 @@ __all__ = [
     "setup_tracing",
     "StructuredLogger",
     "ImmutableAuditLedger",
+    "AuditEvent",
+    "EncryptionEvent",
+    "KeyRotationEvent",
+    "AccessEvent",
+    "ConfigChangeEvent",
     "monitoring_metrics",
     "monitoring_security_events",
     "monitoring_telemetry",
