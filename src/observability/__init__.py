@@ -16,6 +16,14 @@ from .audit_event_schema import (
 )
 from .distributed_tracing import setup_tracing
 from .structured_logging import StructuredLogger
+from .audit_storage import (
+    AuditFilter,
+    AuditStorage,
+    AuditStorageBackend,
+    BlockchainAuditBackend,
+    PostgreSQLAuditBackend,
+    S3AuditBackend,
+)
 
 # Optional compatibility bridge so callers can continue using monitoring
 # modules while importing from the observability namespace.
@@ -49,6 +57,12 @@ __all__ = [
     "KeyRotationEvent",
     "AccessEvent",
     "ConfigChangeEvent",
+    "AuditFilter",
+    "AuditStorage",
+    "AuditStorageBackend",
+    "PostgreSQLAuditBackend",
+    "S3AuditBackend",
+    "BlockchainAuditBackend",
     "monitoring_metrics",
     "monitoring_security_events",
     "monitoring_telemetry",
