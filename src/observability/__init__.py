@@ -24,6 +24,15 @@ from .audit_storage import (
     PostgreSQLAuditBackend,
     S3AuditBackend,
 )
+from .compliance_reporter import (
+    ComplianceReportBase,
+    ComplianceReporter,
+    GDPRReport,
+    HIPAAReport,
+    PCIDSSReport,
+    SOC2Report,
+    SignedPDFArtifact,
+)
 
 # Optional compatibility bridge so callers can continue using monitoring
 # modules while importing from the observability namespace.
@@ -63,6 +72,13 @@ __all__ = [
     "PostgreSQLAuditBackend",
     "S3AuditBackend",
     "BlockchainAuditBackend",
+    "SignedPDFArtifact",
+    "ComplianceReportBase",
+    "HIPAAReport",
+    "GDPRReport",
+    "SOC2Report",
+    "PCIDSSReport",
+    "ComplianceReporter",
     "monitoring_metrics",
     "monitoring_security_events",
     "monitoring_telemetry",
