@@ -1,0 +1,26 @@
+name: "aws-kms-provider"
+version: "1.0.0"
+api_version: "v1"
+author: "KeyCrypt Team"
+description: "AWS KMS integration for key management"
+provides:
+  - interface: "KeyProvider"
+    implementation: "keycrypt_aws.AWSKMSProvider"
+dependencies:
+  - "boto3>=1.26.0"
+  - "botocore>=1.29.0"
+configuration:
+  - name: "aws_region"
+    type: "string"
+    required: true
+  - name: "aws_access_key_id"
+    type: "string"
+    required: false
+permissions:
+  - "network_access"
+  - "environment_variables"
+security:
+  permissions:
+    - "network_access"
+    - "environment_variables"
+  signature: ""
