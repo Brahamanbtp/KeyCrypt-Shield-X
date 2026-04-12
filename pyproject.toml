@@ -66,6 +66,7 @@ aioboto3 = "^13.1.1"
 azure-storage-blob = "^12.25.1"
 google-cloud-storage = "^2.19.0"
 pymongo = "^4.8.0"
+elasticsearch = "^8.15.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
