@@ -50,6 +50,7 @@ uvicorn = {version = "^0.35.0", extras = ["standard"]}
 python-multipart = "^0.0.20"
 python-jose = {version = "^3.4.0", extras = ["cryptography"]}
 redis = "^5.2.1"
+aioredis = "^2.0.1"
 grpcio = "^1.71.0"
 grpcio-tools = "^1.71.0"
 protobuf = "^5.29.3"
