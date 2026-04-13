@@ -72,6 +72,8 @@ elasticsearch = "^8.15.1"
 datadog = "^0.49.1"
 ddtrace = "^2.21.5"
 splunk-sdk = "^2.0.2"
+kubernetes = "^31.0.0"
+kopf = "^1.37.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
