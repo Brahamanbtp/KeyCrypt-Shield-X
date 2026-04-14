@@ -78,6 +78,7 @@ kopf = "^1.37.4"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
 pytest-asyncio = "^0.24.0"
+pytest-benchmark = "^5.1.0"
 hypothesis = "^6.129.0"
 black = "^25.1.0"
 mypy = "^1.15.0"
