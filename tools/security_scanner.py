@@ -5,7 +5,7 @@ Capabilities:
 - hardcoded secret detection using regex patterns
 - SQL injection detection using AST heuristics and Bandit integration
 - command injection detection using AST heuristics and Bandit integration
-- dependency CVE lookup using the NIST NVD API
+- dependency CVE lookup using the NIST NVD API and optional safety fallback
 """
 
 from __future__ import annotations
@@ -56,6 +56,25 @@ _PLACEHOLDER_SECRET_VALUES = {
     "your-token",
     "replace_me",
 }
+
+_FAKE_SECRET_MARKERS = {
+    "api_key_example",
+    "dummy_password",
+    "dummy_token",
+    "github_token_example",
+    "aws_key_example",
+    "sk_test_fake_key",
+    "fake_secret",
+    "example_secret",
+    "token_example",
+    "password_example",
+}
+
+_REALISTIC_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),
+    re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}\b"),
+)
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], str, float], ...] = (
     (
@@ -108,6 +127,8 @@ class SecretLeak:
     matched_text: str
     severity: str
     cvss_score: float
+    redaction_suggestion: str
+    remediation: str
     source: str = "regex"
 
 
@@ -121,6 +142,7 @@ class SQLInjection:
     reason: str
     severity: str
     cvss_score: float
+    remediation: str
     source: str = "ast"
 
 
@@ -134,6 +156,7 @@ class CommandInjection:
     reason: str
     severity: str
     cvss_score: float
+    remediation: str
     source: str = "ast"
 
 
@@ -149,6 +172,7 @@ class CVE:
     severity: str
     published: str
     references: tuple[str, ...]
+    remediation: str
 
 
 @dataclass(frozen=True)
@@ -225,6 +249,57 @@ def _quoted_value(text: str) -> str | None:
     return match.group(1)
 
 
+def is_fake_secret(value: str) -> bool:
+    """Return True when a value is an intentionally fake placeholder.
+
+    This helper enforces safe development/test practices by distinguishing
+    example placeholders from realistic credential material.
+    """
+    normalized = value.strip().strip('"').strip("'").strip()
+    if not normalized:
+        return False
+
+    lowered = normalized.lower()
+    if lowered in _PLACEHOLDER_SECRET_VALUES:
+        return True
+
+    if lowered in _FAKE_SECRET_MARKERS:
+        return True
+
+    if lowered.startswith(("fake_", "dummy_", "example_", "test_")):
+        return True
+
+    if lowered.endswith(("_example", "_placeholder", "_dummy")):
+        return True
+
+    if lowered.startswith("sk_test_"):
+        return True
+
+    if all(char.isupper() or char.isdigit() or char == "_" for char in normalized) and (
+        "EXAMPLE" in normalized or "DUMMY" in normalized
+    ):
+        return True
+
+    return False
+
+
+def _redact_secret(value: str) -> str:
+    trimmed = value.strip()
+    if not trimmed:
+        return "[REDACTED]"
+    if len(trimmed) <= 4:
+        return "*" * len(trimmed)
+    return f"{trimmed[:2]}{'*' * (len(trimmed) - 4)}{trimmed[-2:]}"
+
+
+def _secret_remediation(secret_name: str) -> str:
+    return (
+        "Move secret material to environment variables or a secret manager. "
+        f"Use os.getenv('{secret_name.upper()}') in code, rotate the exposed value, "
+        "and avoid committing credentials to version control."
+    )
+
+
 def _canonicalize_package_name(value: str) -> str:
     return re.sub(r"-+", "-", value.strip().lower().replace("_", "-"))
 
@@ -276,6 +351,85 @@ def _parse_requirements(requirements_file: Path) -> list[tuple[str, str]]:
             seen.add(item)
 
     return dependencies
+
+
+def _run_safety_payload(requirements_file: Path) -> Any | None:
+    if importlib.util.find_spec("safety") is None:
+        return None
+
+    commands = (
+        [sys.executable, "-m", "safety", "check", "--json", "--file", str(requirements_file)],
+        [sys.executable, "-m", "safety", "scan", "--output", "json", "--file", str(requirements_file)],
+    )
+
+    for command in commands:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        payload = _extract_json_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
+        if payload is not None:
+            return payload
+
+    return None
+
+
+def _parse_safety_payload(payload: Any) -> list[CVE]:
+    if payload is None:
+        return []
+
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("vulnerabilities"), list):
+            items = payload["vulnerabilities"]
+        elif isinstance(payload.get("results"), dict) and isinstance(
+            payload["results"].get("vulnerabilities"), list
+        ):
+            items = payload["results"]["vulnerabilities"]
+        else:
+            items = []
+    else:
+        items = []
+
+    findings: list[CVE] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        package = _canonicalize_package_name(str(item.get("package_name") or item.get("package") or ""))
+        version = str(item.get("installed_version") or item.get("analyzed_version") or "")
+        cve_id = str(item.get("CVE") or item.get("cve") or item.get("vulnerability_id") or "UNKNOWN-CVE")
+        description = str(item.get("advisory") or item.get("description") or "No advisory text")
+        severity = _normalize_severity(str(item.get("severity") or "unknown"))
+        cvss_score = _severity_to_cvss(severity)
+
+        fixed_versions = item.get("fixed_versions")
+        if isinstance(fixed_versions, list):
+            fix_hint = ", ".join(str(version_item) for version_item in fixed_versions)
+        elif isinstance(fixed_versions, str):
+            fix_hint = fixed_versions
+        else:
+            fix_hint = "latest safe release"
+
+        remediation = (
+            f"Upgrade {package or 'dependency'} from {version or 'current version'} "
+            f"to a non-vulnerable release ({fix_hint}) and re-run vulnerability scans."
+        )
+
+        findings.append(
+            CVE(
+                package=package,
+                installed_version=version,
+                cve_id=cve_id,
+                description=description,
+                cvss_score=cvss_score,
+                severity=severity,
+                published=str(item.get("published") or ""),
+                references=tuple(),
+                remediation=remediation,
+            )
+        )
+
+    findings.sort(key=lambda entry: (entry.cvss_score, entry.cve_id), reverse=True)
+    return findings
 
 
 def _parse_bandit_issues(payload: Any) -> tuple[_BanditIssue, ...]:
@@ -534,6 +688,10 @@ def _parse_nvd_payload(package: str, version: str, payload: Mapping[str, Any]) -
                 severity=severity,
                 published=published,
                 references=tuple(reference_urls),
+                remediation=(
+                    f"Upgrade {package} to a patched version, pin secure ranges in requirements, "
+                    "and verify fixes with a follow-up scan."
+                ),
             )
         )
 
@@ -552,10 +710,26 @@ def scan_for_hardcoded_secrets(source_dir: Path) -> List[SecretLeak]:
             for secret_type, pattern, severity, score in _SECRET_PATTERNS:
                 for match in pattern.finditer(line):
                     matched_text = match.group(0).strip()
-                    if secret_type == "hardcoded_credential":
-                        candidate = _quoted_value(matched_text)
-                        if candidate and candidate.strip().lower() in _PLACEHOLDER_SECRET_VALUES:
-                            continue
+
+                    candidate = _quoted_value(matched_text) or matched_text
+                    severity_value = severity
+                    score_value = float(score)
+                    if is_fake_secret(candidate):
+                        severity_value = "low"
+                        score_value = 1.0
+
+                    # Realistic-looking secret patterns should always remain high severity.
+                    if any(pattern_item.search(candidate) for pattern_item in _REALISTIC_SECRET_PATTERNS):
+                        severity_value = severity
+                        score_value = float(score)
+
+                    redaction = _redact_secret(candidate)
+
+                    env_name_match = re.search(
+                        r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|token|private[_-]?key|access[_-]?key)\b",
+                        line,
+                    )
+                    env_name = env_name_match.group(1) if env_name_match else "SECRET_VALUE"
 
                     findings.append(
                         SecretLeak(
@@ -563,8 +737,10 @@ def scan_for_hardcoded_secrets(source_dir: Path) -> List[SecretLeak]:
                             line_no=line_no,
                             secret_type=secret_type,
                             matched_text=matched_text,
-                            severity=severity,
-                            cvss_score=float(score),
+                            severity=severity_value,
+                            cvss_score=score_value,
+                            redaction_suggestion=f"Replace literal with [REDACTED:{redaction}]",
+                            remediation=_secret_remediation(env_name),
                             source="regex",
                         )
                     )
@@ -580,6 +756,11 @@ def scan_for_hardcoded_secrets(source_dir: Path) -> List[SecretLeak]:
                 matched_text=issue.issue_text,
                 severity=issue.severity,
                 cvss_score=_severity_to_cvss(issue.severity),
+                redaction_suggestion="Replace detected literal with [REDACTED]",
+                remediation=(
+                    "Replace hardcoded secrets with environment variables and secret manager lookups "
+                    "(for example, os.getenv('API_KEY'))."
+                ),
                 source="bandit",
             )
         )
@@ -635,6 +816,10 @@ def scan_for_sql_injection(source_dir: Path) -> List[SQLInjection]:
                     reason=reason,
                     severity=severity,
                     cvss_score=float(score),
+                    remediation=(
+                        "Use parameterized queries with placeholders and bound parameters; avoid "
+                        "f-strings, concatenation, and .format() for SQL statements."
+                    ),
                     source="ast",
                 )
             )
@@ -650,6 +835,10 @@ def scan_for_sql_injection(source_dir: Path) -> List[SQLInjection]:
                 reason=issue.issue_text,
                 severity=issue.severity,
                 cvss_score=_severity_to_cvss(issue.severity),
+                remediation=(
+                    "Refactor database access to parameterized queries and enforce strict input "
+                    "validation on query parameters."
+                ),
                 source="bandit",
             )
         )
@@ -712,6 +901,10 @@ def scan_for_command_injection(source_dir: Path) -> List[CommandInjection]:
                         reason=reason,
                         severity=severity,
                         cvss_score=float(score),
+                        remediation=(
+                            "Avoid shell execution for user-controlled inputs. Use vetted allow-lists, "
+                            "argument arrays, and subprocess calls with shell=False."
+                        ),
                         source="ast",
                     )
                 )
@@ -736,6 +929,10 @@ def scan_for_command_injection(source_dir: Path) -> List[CommandInjection]:
                             reason=reason,
                             severity=severity,
                             cvss_score=float(score),
+                            remediation=(
+                                "Set shell=False, pass argument lists, and validate command inputs with "
+                                "strict allow-lists."
+                            ),
                             source="ast",
                         )
                     )
@@ -748,6 +945,10 @@ def scan_for_command_injection(source_dir: Path) -> List[CommandInjection]:
                             reason="subprocess call receives dynamic command argument",
                             severity="medium",
                             cvss_score=6.2,
+                            remediation=(
+                                "Avoid passing raw dynamic command strings. Build explicit argument lists "
+                                "and validate each argument."
+                            ),
                             source="ast",
                         )
                     )
@@ -763,6 +964,10 @@ def scan_for_command_injection(source_dir: Path) -> List[CommandInjection]:
                 reason=issue.issue_text,
                 severity=issue.severity,
                 cvss_score=_severity_to_cvss(issue.severity),
+                remediation=(
+                    "Use subprocess with shell=False, sanitize inputs, and avoid command strings "
+                    "constructed from untrusted data."
+                ),
                 source="bandit",
             )
         )
@@ -782,8 +987,9 @@ def scan_for_command_injection(source_dir: Path) -> List[CommandInjection]:
 
 
 def scan_dependencies_for_cves(requirements_file: Path) -> List[CVE]:
-    """Scan requirements for known CVEs using the NIST NVD API."""
-    dependencies = _parse_requirements(Path(requirements_file).expanduser().resolve())
+    """Scan requirements for known CVEs using NVD with optional safety fallback."""
+    resolved_requirements = Path(requirements_file).expanduser().resolve()
+    dependencies = _parse_requirements(resolved_requirements)
 
     findings: list[CVE] = []
     for package, version in dependencies:
@@ -791,6 +997,9 @@ def scan_dependencies_for_cves(requirements_file: Path) -> List[CVE]:
         if payload is None:
             continue
         findings.extend(_parse_nvd_payload(package, version, payload))
+
+    safety_payload = _run_safety_payload(resolved_requirements)
+    findings.extend(_parse_safety_payload(safety_payload))
 
     deduped: dict[tuple[str, str, str], CVE] = {}
     for item in findings:
@@ -811,6 +1020,7 @@ __all__ = [
     "CommandInjection",
     "SQLInjection",
     "SecretLeak",
+    "is_fake_secret",
     "scan_dependencies_for_cves",
     "scan_for_command_injection",
     "scan_for_hardcoded_secrets",
