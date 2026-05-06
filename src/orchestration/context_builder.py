@@ -93,6 +93,46 @@ class EncryptionContextBuilder:
 
         return self
 
+    def with_performance(self, target: PerformanceTarget) -> Self:
+        """Set the performance optimization strategy."""
+        if not isinstance(target, PerformanceTarget):
+            raise TypeError("target must be a PerformanceTarget value")
+        self._performance_target = target
+        return self
+
+    def with_metadata(self, key: str, value: Any) -> Self:
+        """Add a single metadata key-value pair."""
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("metadata key must be a non-empty string")
+        self._metadata[key.strip()] = value
+        return self
+
+    def with_metadata_dict(self, metadata: dict[str, Any]) -> Self:
+        """Merge multiple metadata key-value pairs."""
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dictionary")
+        self._metadata.update(metadata)
+        return self
+
+    def clear_compliance(self) -> Self:
+        """Clear all accumulated compliance requirements."""
+        self._compliance_requirements = []
+        return self
+
+    def clear_metadata(self) -> Self:
+        """Clear all accumulated metadata."""
+        self._metadata = {}
+        return self
+
+    def reset(self) -> Self:
+        """Reset builder to initial state."""
+        self._user_id = None
+        self._data_classification = DataClassification.INTERNAL
+        self._compliance_requirements = []
+        self._performance_target = PerformanceTarget.BALANCED
+        self._metadata = {}
+        return self
+
     def build(self) -> EncryptionContext:
         """Build and validate an immutable `EncryptionContext` instance."""
         if self._user_id is None:
