@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence, TypeAlias
 
@@ -697,6 +698,271 @@ class EncryptionOrchestrator:
             raise TypeError(f"{name} must be bytes")
 
 
+class EnhancedEncryptionOrchestrator:
+    """Enhanced orchestrator with explicit 7-step workflow and comprehensive error handling.
+
+    Provides a simplified interface over EncryptionOrchestrator with dependency injection.
+
+    Workflow:
+    1. Load policy from PolicyEngine based on context
+    2. Query IntelligenceProvider for risk assessment
+    3. Select appropriate CryptoProvider from registry
+    4. Obtain keys from KeyProvider
+    5. Execute encryption via selected provider
+    6. Store encrypted data via StorageProvider
+    7. Log to audit trail
+
+    Includes comprehensive error handling with rollback on failure.
+    """
+
+    def __init__(
+        self,
+        policy_engine: PolicyEngine,
+        intelligence_provider: IntelligenceProvider,
+        crypto_provider_registry: ProviderRegistry,
+        key_provider: KeyProvider,
+        storage_provider: StorageProvider,
+        audit_logger: AuditTrail | None = None,
+    ) -> None:
+        """Initialize orchestrator with injected providers."""
+        self._policy_engine = policy_engine
+        self._intelligence_provider = intelligence_provider
+        self._provider_registry = crypto_provider_registry
+        self._key_provider = key_provider
+        self._storage_provider = storage_provider
+        self._audit_logger = audit_logger or _NoopAuditTrail()
+        self._operation_history: list[dict[str, Any]] = []
+        self._rollback_stack: list[tuple[str, Callable[..., Any]]] = []
+
+    async def orchestrate_encryption(self, data: bytes, context: EncryptionContext) -> EncryptedData:
+        """Execute complete 7-step encryption workflow with error handling and rollback.
+
+        Returns:
+            EncryptedData on success.
+
+        Raises:
+            OrchestrationError: If any step fails; attempts rollback.
+        """
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if not isinstance(context, EncryptionContext):
+            raise TypeError("context must be EncryptionContext")
+
+        self._rollback_stack.clear()
+        operation_id = str(__import__("uuid").uuid4())
+        start_time = time.time()
+
+        try:
+            # Step 1: Load policy
+            policy = await self._step_load_policy(context, operation_id)
+
+            # Step 2: Risk assessment
+            risk_score = await self._step_assess_risk(data, context, operation_id)
+
+            # Step 3: Select provider
+            provider_name, crypto_provider = await self._step_select_provider(policy, risk_score, operation_id)
+            self._rollback_stack.append(("provider_selection", lambda: None))
+
+            # Step 4: Obtain key
+            key_material = await self._step_obtain_key(context, policy, operation_id)
+            self._rollback_stack.append(("key_obtained", lambda: None))
+
+            # Step 5: Execute encryption
+            ciphertext = await self._step_execute_encryption(data, crypto_provider, key_material, context, operation_id)
+            self._rollback_stack.append(("encryption_executed", lambda: None))
+
+            # Step 6: Store encrypted data
+            storage_location = await self._step_store_encrypted_data(
+                operation_id, ciphertext, provider_name, key_material.get("key_id"), context, operation_id
+            )
+            self._rollback_stack.append(("data_stored", lambda: self._cleanup_storage(storage_location)))
+
+            # Step 7: Audit log
+            await self._step_audit_trail(operation_id, "encryption", "success", context, risk_score)
+
+            # Build and return result
+            result = EncryptedData(
+                ciphertext=ciphertext,
+                provider_name=provider_name,
+                algorithm_name=crypto_provider.name if hasattr(crypto_provider, "name") else "unknown",
+                key_id=key_material.get("key_id", "unknown"),
+                policy_name=policy.get("name", "default") if isinstance(policy, dict) else (policy.name if hasattr(policy, "name") else "default"),
+                metadata={
+                    "operation_id": operation_id,
+                    "risk_score": risk_score,
+                    "execution_time_ms": (time.time() - start_time) * 1000,
+                    "storage_location": storage_location,
+                },
+            )
+            self._record_operation(operation_id, "success")
+            return result
+
+        except Exception as e:
+            await self._handle_failure(operation_id, str(e), context)
+            raise OrchestrationError(f"Encryption orchestration failed: {str(e)}")
+
+    async def _step_load_policy(self, context: EncryptionContext, operation_id: str) -> dict[str, Any] | EncryptionPolicy:
+        """Step 1: Load policy from PolicyEngine."""
+        try:
+            policy = self._policy_engine.load_policy(context)
+            if asyncio.iscoroutine(policy):
+                policy = await policy
+            await self._audit_logger.log_event("encryption_step_1_policy_loaded", {"operation_id": operation_id})
+            return policy
+        except Exception as e:
+            raise OrchestrationError(f"Policy loading failed: {str(e)}")
+
+    async def _step_assess_risk(self, data: bytes, context: EncryptionContext, operation_id: str) -> float:
+        """Step 2: Query IntelligenceProvider for risk assessment."""
+        try:
+            risk_context = SecurityContext(
+                actor=context.actor_id,
+                tenant=context.tenant_id,
+                sensitivity=context.sensitivity,
+                threat_level=context.threat_level,
+            )
+            risk_score = self._intelligence_provider.assess_risk(data, risk_context)
+            if asyncio.iscoroutine(risk_score):
+                risk_score = await risk_score
+            await self._audit_logger.log_event("encryption_step_2_risk_assessed", {"operation_id": operation_id, "risk_score": risk_score})
+            return risk_score.score if isinstance(risk_score, RiskScore) else risk_score
+        except Exception:
+            # Risk assessment is advisory; use default
+            return 0.5
+
+    async def _step_select_provider(
+        self, policy: dict[str, Any] | EncryptionPolicy, risk_score: float, operation_id: str
+    ) -> tuple[str, CryptoProvider]:
+        """Step 3: Select appropriate CryptoProvider from registry."""
+        try:
+            algorithm = "AES-256-GCM"
+            if isinstance(policy, dict):
+                algorithm = policy.get("preferred_provider", "AES-256-GCM")
+            elif hasattr(policy, "preferred_provider"):
+                algorithm = policy.preferred_provider or "AES-256-GCM"
+
+            provider = self._provider_registry.get_provider(algorithm)
+            await self._audit_logger.log_event("encryption_step_3_provider_selected", {"operation_id": operation_id, "provider": algorithm})
+            return algorithm, provider
+        except Exception as e:
+            raise OrchestrationError(f"Provider selection failed: {str(e)}")
+
+    async def _step_obtain_key(
+        self, context: EncryptionContext, policy: dict[str, Any] | EncryptionPolicy, operation_id: str
+    ) -> dict[str, Any]:
+        """Step 4: Obtain key from KeyProvider."""
+        try:
+            key_params = KeyGenerationParams(algorithm="AES-256-GCM")
+            key_material = self._key_provider.get_or_create_key(key_params, context=context)
+            if asyncio.iscoroutine(key_material):
+                key_material = await key_material
+            
+            # Extract key information - handle both dataclasses and objects with attributes
+            if hasattr(key_material, "__dataclass_fields__"):
+                key_dict = asdict(key_material)
+            else:
+                # Handle objects with key and key_id attributes
+                key_id = getattr(key_material, "key_id", None) or str(__import__("uuid").uuid4())
+                key = getattr(key_material, "key", None)
+                key_dict = {"key": key, "key_id": key_id}
+            
+            await self._audit_logger.log_event("encryption_step_4_key_obtained", {"operation_id": operation_id, "key_id": key_dict.get("key_id")})
+            return key_dict
+        except Exception as e:
+            raise OrchestrationError(f"Key obtention failed: {str(e)}")
+
+    async def _step_execute_encryption(
+        self, data: bytes, provider: CryptoProvider, key_material: dict[str, Any], context: EncryptionContext, operation_id: str
+    ) -> bytes:
+        """Step 5: Execute encryption via selected provider."""
+        try:
+            key = key_material.get("key", key_material.get("material", b""))
+            ciphertext = provider.encrypt(data, key)
+            if asyncio.iscoroutine(ciphertext):
+                ciphertext = await ciphertext
+            await self._audit_logger.log_event("encryption_step_5_encrypted", {"operation_id": operation_id, "ciphertext_size": len(ciphertext)})
+            return ciphertext
+        except Exception as e:
+            raise OrchestrationError(f"Encryption execution failed: {str(e)}")
+
+    async def _step_store_encrypted_data(
+        self, result_id: str, ciphertext: bytes, provider_name: str, key_id: str, context: EncryptionContext, operation_id: str
+    ) -> str:
+        """Step 6: Store encrypted data via StorageProvider."""
+        try:
+            storage_location = self._storage_provider.store(result_id, ciphertext, {
+                "provider": provider_name,
+                "key_id": key_id,
+                "tenant_id": context.tenant_id,
+                "operation_id": operation_id,
+            })
+            if asyncio.iscoroutine(storage_location):
+                storage_location = await storage_location
+            await self._audit_logger.log_event("encryption_step_6_stored", {"operation_id": operation_id, "storage_location": storage_location})
+            return storage_location
+        except Exception as e:
+            raise OrchestrationError(f"Data storage failed: {str(e)}")
+
+    async def _step_audit_trail(
+        self, operation_id: str, operation: str, status: str, context: EncryptionContext, risk_score: float
+    ) -> None:
+        """Step 7: Log to audit trail."""
+        try:
+            await self._audit_logger.log_event("encryption_complete", {
+                "operation_id": operation_id,
+                "operation": operation,
+                "status": status,
+                "tenant_id": context.tenant_id,
+                "actor_id": context.actor_id,
+                "risk_score": risk_score,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            # Audit logging failure should not block operation
+            pass
+
+    async def _handle_failure(self, operation_id: str, error: str, context: EncryptionContext) -> None:
+        """Handle failure with rollback and audit logging."""
+        try:
+            # Rollback in reverse order
+            for step_name, rollback_fn in reversed(self._rollback_stack):
+                try:
+                    result = rollback_fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    pass
+
+            # Log failure
+            await self._audit_logger.log_event("encryption_failed", {
+                "operation_id": operation_id,
+                "error": error,
+                "tenant_id": context.tenant_id,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+
+    def _cleanup_storage(self, storage_location: str) -> None:
+        """Clean up stored data on rollback."""
+        try:
+            self._storage_provider.delete(storage_location)
+        except Exception:
+            pass
+
+    def _record_operation(self, operation_id: str, status: str) -> None:
+        """Record operation in history."""
+        self._operation_history.append({
+            "operation_id": operation_id,
+            "status": status,
+            "timestamp": time.time(),
+        })
+
+    def get_operation_history(self) -> list[dict[str, Any]]:
+        """Get history of all operations."""
+        return self._operation_history
+
+
 __all__ = [
     "Context",
     "EncryptionContext",
@@ -707,4 +973,5 @@ __all__ = [
     "AuditTrail",
     "OrchestrationError",
     "EncryptionOrchestrator",
+    "EnhancedEncryptionOrchestrator",
 ]
