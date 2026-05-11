@@ -301,3 +301,200 @@ async def test_streaming_memory_usage_stable_over_time(large_temp_file: tuple[Pa
 
     assert (current - baseline_current) < (5 * 1024 * 1024)
     assert peak < (64 * 1024 * 1024)
+
+
+class TestStreamCipherAdapterAlgorithms:
+    """Tests for StreamCipherAdapter with different algorithms."""
+
+    @pytest.mark.asyncio
+    async def test_chacha20_roundtrip(self) -> None:
+        """Test ChaCha20 encryption/decryption roundtrip."""
+        provider = _StreamContextProvider("chacha20-poly1305", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Hello, ChaCha20! " * 100
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+    @pytest.mark.asyncio
+    async def test_aes_ctr_16_byte_key(self) -> None:
+        """Test AES-CTR with 16-byte key."""
+        provider = _StreamContextProvider("aes-128-ctr", key=b"K" * 16, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Test AES-CTR-128 " * 50
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+    @pytest.mark.asyncio
+    async def test_aes_ctr_32_byte_key(self) -> None:
+        """Test AES-CTR with 32-byte key."""
+        provider = _StreamContextProvider("aes-256-ctr", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Test AES-CTR-256 " * 50
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+
+class TestStreamCipherAdapterChunking:
+    """Tests for StreamCipherAdapter with various chunking patterns."""
+
+    @pytest.mark.asyncio
+    async def test_many_small_chunks(self) -> None:
+        """Test encryption of many small chunks."""
+        provider = _StreamContextProvider("chacha20", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"small" * 1000
+        chunks = [plaintext[i : i + 5] for i in range(0, len(plaintext), 5)]
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes(chunks), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+    @pytest.mark.asyncio
+    async def test_mixed_chunk_sizes(self) -> None:
+        """Test encryption with mixed chunk sizes."""
+        provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        chunks = [b"A" * 100, b"B" * 1000, b"C" * 50, b"D" * 2000, b"E" * 10]
+        plaintext = b"".join(chunks)
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes(chunks), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+
+class TestStreamCipherAdapterAuthentication:
+    """Tests for authentication verification in StreamCipherAdapter."""
+
+    @pytest.mark.asyncio
+    async def test_authentication_failure_on_corrupted_ciphertext(self) -> None:
+        """Test that authentication fails when ciphertext is corrupted."""
+        provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Sensitive data" * 100
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+
+        corrupted = bytearray(ciphertext)
+        if len(corrupted) > 50:
+            corrupted[50] ^= 0xFF
+
+        with pytest.raises(ValueError, match="authentication failed"):
+            await _collect_bytes(
+                adapter.decrypt_stream(_async_iter_bytes([bytes(corrupted)]), provider)
+            )
+
+    @pytest.mark.asyncio
+    async def test_authentication_failure_on_truncated_stream(self) -> None:
+        """Test that authentication fails when stream is truncated."""
+        provider = _StreamContextProvider("chacha20", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Test data" * 100
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+
+        truncated = ciphertext[:-10] if len(ciphertext) > 10 else b""
+
+        with pytest.raises(ValueError, match="truncated|authentication"):
+            await _collect_bytes(
+                adapter.decrypt_stream(_async_iter_bytes([truncated]), provider)
+            )
+
+    @pytest.mark.asyncio
+    async def test_authentication_with_custom_hmac_key(self) -> None:
+        """Test authentication with explicit HMAC key."""
+        provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"HMAC" * 8)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Custom HMAC key test" * 50
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == plaintext
+
+
+class TestStreamCipherAdapterErrorHandling:
+    """Tests for error handling in StreamCipherAdapter."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_algorithm_in_stream_header(self) -> None:
+        """Test error when stream has invalid algorithm ID."""
+        provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+
+        invalid_header = b"KCSC" + bytes([1]) + bytes([99]) + bytes([32]) + b"N" * 16
+
+        with pytest.raises(ValueError, match="unsupported stream algorithm"):
+            await _collect_bytes(
+                adapter.decrypt_stream(_async_iter_bytes([invalid_header]), provider)
+            )
+
+    @pytest.mark.asyncio
+    async def test_algorithm_mismatch(self) -> None:
+        """Test error when decryption algorithm doesn't match stream."""
+        provider = _StreamContextProvider("chacha20", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+        plaintext = b"Test" * 100
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([plaintext]), provider)
+        )
+
+        aes_provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"H" * 32)
+        with pytest.raises(ValueError, match="algorithm mismatch"):
+            await _collect_bytes(
+                adapter.decrypt_stream(_async_iter_bytes([ciphertext]), aes_provider)
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_plaintext(self) -> None:
+        """Test encryption of empty plaintext."""
+        provider = _StreamContextProvider("aes-256", key=b"K" * 32, hmac_key=b"H" * 32)
+        adapter = StreamCipherAdapter()
+
+        ciphertext = await _collect_bytes(
+            adapter.encrypt_stream(_async_iter_bytes([b""]), provider)
+        )
+        decrypted = await _collect_bytes(
+            adapter.decrypt_stream(_async_iter_bytes([ciphertext]), provider)
+        )
+
+        assert decrypted == b""
