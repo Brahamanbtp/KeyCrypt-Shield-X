@@ -1,12 +1,3 @@
-"""Batch SDK operations for parallel file processing.
-
-This module provides high-level async batch helpers built on top of
-`src.sdk.async_operations` while adding:
-- semaphore-limited parallelism
-- per-file failure isolation
-- batch-level progress reporting (completed / total)
-"""
-
 from __future__ import annotations
 
 import asyncio
