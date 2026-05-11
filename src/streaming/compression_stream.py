@@ -1,163 +1,166 @@
-"""Streaming compression and decompression adapters for async pipelines.
+"""Streaming compression wrappers that integrate with src/utils/compression.py.
 
-This layer wraps shared compression utilities and exposes transparent
-AsyncIterator-based transforms that avoid buffering full payloads in memory.
+Provides async streaming compressors/decompressors that do not buffer the
+entire payload and support adaptive compression level selection based on an
+initial sample. Tracks simple compression statistics (input/output bytes,
+compression ratio, chosen level).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import AsyncIterator
+import asyncio
+from typing import AsyncIterator, Optional
 
 from src.utils.compression import (
-    clamp_level,
-    create_stream_compressor,
-    create_stream_decompressor,
     normalize_algorithm,
     select_adaptive_level,
+    create_stream_compressor,
+    create_stream_decompressor,
 )
 
 
-@dataclass(frozen=True)
-class CompressionStreamStats:
-    """Per-stream compression/decompression metrics snapshot."""
+class CompressionStats:
+    def __init__(self) -> None:
+        self.algorithm: str = ""
+        self.level: Optional[int] = None
+        self.input_bytes: int = 0
+        self.output_bytes: int = 0
 
-    algorithm: str
-    level: int | None
-    input_bytes: int
-    output_bytes: int
-    ratio: float
+    @property
+    def ratio(self) -> float:
+        if self.input_bytes == 0:
+            return 0.0
+        return float(self.output_bytes) / float(self.input_bytes)
 
 
-class CompressionStream:
-    """Transparent async compression wrapper for pipeline stages.
+class _CompressIterator:
+    def __init__(self, source: AsyncIterator[bytes], algorithm: str, level: Optional[int], sample_size: int) -> None:
+        self._src = source
+        self._algorithm = normalize_algorithm(algorithm)
+        self._baseline_level = level
+        self._sample_size = int(sample_size)
+        self.stats = CompressionStats()
 
-    Features:
-    - Incremental compression/decompression over async chunk iterators.
-    - Adaptive compression-level selection based on early-stream sample.
-    - Compression ratio tracking for the most recent operations.
+        self._buffer: list[bytes] | None = None
+        self._buffer_idx = 0
+        self._compressor = None
+        self._phase = "sampling"  # sampling -> compressing -> flushing -> done
+
+    def __aiter__(self) -> "_CompressIterator":
+        return self
+
+    async def __anext__(self) -> bytes:
+        # Sampling phase: consume up to sample_size bytes to select level
+        if self._phase == "sampling":
+            self._buffer = []
+            total = 0
+            async for chunk in self._src:
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise TypeError("source must yield bytes")
+                b = bytes(chunk)
+                self._buffer.append(b)
+                total += len(b)
+                if total >= self._sample_size:
+                    break
+
+            sample = b"".join(self._buffer)[: self._sample_size]
+            chosen = select_adaptive_level(self._algorithm, sample, baseline_level=self._baseline_level)
+            self._compressor = create_stream_compressor(self._algorithm, chosen)
+            self.stats.algorithm = self._algorithm
+            self.stats.level = chosen
+            self._phase = "compressing"
+
+        # Compressing: first drain buffered chunks, then continue reading source
+        while self._phase == "compressing":
+            if self._buffer is not None and self._buffer_idx < len(self._buffer):
+                chunk = self._buffer[self._buffer_idx]
+                self._buffer_idx += 1
+            else:
+                try:
+                    chunk = await self._src.__anext__()
+                except StopAsyncIteration:
+                    self._phase = "flushing"
+                    break
+
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise TypeError("source must yield bytes")
+
+            chunk = bytes(chunk)
+            out = self._compressor.compress(chunk)
+            self.stats.input_bytes += len(chunk)
+            self.stats.output_bytes += len(out)
+            if out:
+                return out
+            # otherwise continue loop to pull next compressed output
+
+        # Flushing when source exhausted
+        if self._phase == "flushing":
+            tail = self._compressor.flush()
+            self.stats.output_bytes += len(tail)
+            self._phase = "done"
+            if tail:
+                return tail
+
+        raise StopAsyncIteration
+
+
+class _DecompressIterator:
+    def __init__(self, source: AsyncIterator[bytes], algorithm: str) -> None:
+        self._src = source
+        self._algorithm = normalize_algorithm(algorithm)
+        self._decompressor = create_stream_decompressor(self._algorithm)
+        self.stats = CompressionStats()
+        self._done = False
+
+    def __aiter__(self) -> "_DecompressIterator":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._done:
+            raise StopAsyncIteration
+
+        async for chunk in self._src:
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise TypeError("source must yield bytes")
+            chunk = bytes(chunk)
+            out = self._decompressor.decompress(chunk)
+            self.stats.input_bytes += len(chunk)
+            self.stats.output_bytes += len(out)
+            if out:
+                return out
+            # continue to next compressed chunk
+
+        # source exhausted: flush
+        tail = self._decompressor.flush()
+        self.stats.output_bytes += len(tail)
+        self._done = True
+        if tail:
+            return tail
+        raise StopAsyncIteration
+
+
+async def compress_stream(input: AsyncIterator[bytes], algorithm: str = "zstd", level: Optional[int] = None, sample_size: int = 8192) -> AsyncIterator[bytes]:
+    """Async streaming compression wrapper.
+
+    - `algorithm`: one of zstd, brotli, gzip, lz4
+    - `level`: optional baseline level; adaptive selection uses `sample_size` bytes
+    - `sample_size`: bytes to sample for adaptive level selection
+
+    Returns an async iterator over compressed bytes. The returned async
+    iterator object exposes a `stats` attribute with compression metrics.
     """
-
-    def __init__(self, default_level: int | None = None) -> None:
-        self._default_level = default_level
-        self._last_compression_stats: CompressionStreamStats | None = None
-        self._last_decompression_stats: CompressionStreamStats | None = None
-
-    async def compress_stream(
-        self,
-        input: AsyncIterator[bytes],
-        algorithm: str = "zstd",
-    ) -> AsyncIterator[bytes]:
-        """Compress an async byte stream using incremental codec state.
-
-        Args:
-            input: Async stream yielding plaintext chunks.
-            algorithm: Compression algorithm name (zstd, brotli, gzip, lz4).
-
-        Yields:
-            Compressed byte chunks.
-        """
-        normalized = normalize_algorithm(algorithm)
-
-        total_in = 0
-        total_out = 0
-        selected_level: int | None = None
-        compressor = None
-
-        async for chunk in input:
-            if not isinstance(chunk, bytes):
-                raise TypeError("input stream must yield bytes")
-
-            if compressor is None:
-                selected_level = select_adaptive_level(
-                    normalized,
-                    chunk,
-                    baseline_level=self._default_level,
-                )
-                compressor = create_stream_compressor(normalized, selected_level)
-
-            total_in += len(chunk)
-            compressed = compressor.compress(chunk)
-            if compressed:
-                total_out += len(compressed)
-                yield compressed
-
-        if compressor is None:
-            selected_level = clamp_level(normalized, self._default_level)
-            compressor = create_stream_compressor(normalized, selected_level)
-
-        tail = compressor.flush()
-        if tail:
-            total_out += len(tail)
-            yield tail
-
-        self._last_compression_stats = CompressionStreamStats(
-            algorithm=normalized,
-            level=selected_level,
-            input_bytes=total_in,
-            output_bytes=total_out,
-            ratio=self._safe_ratio(total_out, total_in),
-        )
-
-    async def decompress_stream(
-        self,
-        input: AsyncIterator[bytes],
-        algorithm: str,
-    ) -> AsyncIterator[bytes]:
-        """Decompress an async byte stream using incremental codec state.
-
-        Args:
-            input: Async stream yielding compressed chunks.
-            algorithm: Compression algorithm used by the input stream.
-
-        Yields:
-            Decompressed byte chunks.
-        """
-        normalized = normalize_algorithm(algorithm)
-        decompressor = create_stream_decompressor(normalized)
-
-        total_in = 0
-        total_out = 0
-
-        async for chunk in input:
-            if not isinstance(chunk, bytes):
-                raise TypeError("input stream must yield bytes")
-
-            total_in += len(chunk)
-            decompressed = decompressor.decompress(chunk)
-            if decompressed:
-                total_out += len(decompressed)
-                yield decompressed
-
-        tail = decompressor.flush()
-        if tail:
-            total_out += len(tail)
-            yield tail
-
-        self._last_decompression_stats = CompressionStreamStats(
-            algorithm=normalized,
-            level=None,
-            input_bytes=total_in,
-            output_bytes=total_out,
-            ratio=self._safe_ratio(total_in, total_out),
-        )
-
-    def get_last_compression_stats(self) -> CompressionStreamStats | None:
-        """Return metrics for the most recently completed compression stream."""
-        return self._last_compression_stats
-
-    def get_last_decompression_stats(self) -> CompressionStreamStats | None:
-        """Return metrics for the most recently completed decompression stream."""
-        return self._last_decompression_stats
-
-    @staticmethod
-    def _safe_ratio(numerator: int, denominator: int) -> float:
-        if denominator <= 0:
-            return 1.0
-        return float(numerator) / float(denominator)
+    it = _CompressIterator(input, algorithm, level, sample_size)
+    return it
 
 
-__all__: list[str] = [
-    "CompressionStreamStats",
-    "CompressionStream",
-]
+async def decompress_stream(input: AsyncIterator[bytes], algorithm: str) -> AsyncIterator[bytes]:
+    """Async streaming decompression wrapper.
+
+    Returns an async iterator over decompressed bytes. The returned async
+    iterator object exposes a `stats` attribute with decompression metrics.
+    """
+    it = _DecompressIterator(input, algorithm)
+    return it
+
+
+__all__ = ["compress_stream", "decompress_stream", "CompressionStats"]
