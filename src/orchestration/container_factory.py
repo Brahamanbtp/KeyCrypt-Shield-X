@@ -69,6 +69,7 @@ class ContainerFactory:
         self._containers: dict[str, DependencyContainer] = {}
         self._container_configs: dict[str, dict[str, Any]] = {}
         self._custom_providers: dict[type[Any], type[Any]] = {}
+        self._container_metadata: dict[str, dict[str, Any]] = {}
 
     def create_container(self, config: Configuration) -> DependencyContainer:
         """Create or update a named DI container from configuration.
@@ -111,9 +112,27 @@ class ContainerFactory:
         with self._lock:
             self._custom_providers[interface] = implementation
 
-    def reset_container(self) -> None:
-        """Clear and rebuild all currently known named containers."""
+    def reset_container(self, name: str | None = None) -> None:
+        """Clear and rebuild all currently known named containers.
+
+        Args:
+            name: Optional container name to reset. If None, resets all containers.
+
+        Raises:
+            KeyError: If `name` is provided but container does not exist.
+        """
         with self._lock:
+            if name is not None:
+                # Reset specific container
+                if name not in self._containers:
+                    raise KeyError(f"Container '{name}' not found")
+                config = self._container_configs[name]
+                self._safe_unwire(self._containers[name])
+                container = self._build_container(config)
+                self._containers[name] = container
+                return
+
+            # Reset all containers
             previous_configs = deepcopy(self._container_configs)
             previous_containers = list(self._containers.values())
 
@@ -128,6 +147,58 @@ class ContainerFactory:
                 name = self._container_name(cfg)
                 self._containers[name] = container
                 self._container_configs[name] = cfg
+
+    def get_container(self, name: str) -> DependencyContainer | None:
+        """Retrieve a container by name.
+
+        Args:
+            name: Container name.
+
+        Returns:
+            The container if found, otherwise None.
+        """
+        with self._lock:
+            return self._containers.get(name)
+
+    def list_containers(self) -> list[str]:
+        """List all registered container names.
+
+        Returns:
+            List of container names currently managed by this factory.
+        """
+        with self._lock:
+            return list(self._containers.keys())
+
+    def remove_container(self, name: str) -> None:
+        """Remove a named container from the factory.
+
+        Args:
+            name: Container name to remove.
+
+        Raises:
+            KeyError: If container does not exist.
+        """
+        with self._lock:
+            if name not in self._containers:
+                raise KeyError(f"Container '{name}' not found")
+            self._safe_unwire(self._containers[name])
+            del self._containers[name]
+            del self._container_configs[name]
+            if name in self._container_metadata:
+                del self._container_metadata[name]
+
+    def get_container_config(self, name: str) -> dict[str, Any] | None:
+        """Get the configuration for a named container.
+
+        Args:
+            name: Container name.
+
+        Returns:
+            A copy of the container configuration, or None if not found.
+        """
+        with self._lock:
+            config = self._container_configs.get(name)
+            return deepcopy(config) if config else None
 
     def _build_container(self, config: dict[str, Any]) -> DependencyContainer:
         container = CoreContainer()
@@ -273,8 +344,25 @@ class ContainerFactory:
             pass
 
 
+# Global singleton factory instance
+_global_factory: ContainerFactory | None = None
+
+
+def get_factory() -> ContainerFactory:
+    """Get or create the global container factory instance.
+
+    Returns:
+        The global ContainerFactory singleton.
+    """
+    global _global_factory
+    if _global_factory is None:
+        _global_factory = ContainerFactory()
+    return _global_factory
+
+
 __all__: list[str] = [
     "Configuration",
     "DependencyContainer",
     "ContainerFactory",
+    "get_factory",
 ]
