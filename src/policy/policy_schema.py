@@ -18,6 +18,52 @@ _FIELD_PATH_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0
 _KEY_ROTATION_PATTERN = re.compile(r"^\d+[dhmw]$", re.IGNORECASE)
 
 
+def _normalize_policy_schema_version(raw_version: Any) -> "PolicySchemaVersion":
+    """Normalize legacy and canonical schema version values."""
+    if isinstance(raw_version, PolicySchemaVersion):
+        return raw_version
+
+    if isinstance(raw_version, int):
+        if raw_version == 1:
+            return PolicySchemaVersion.V1
+        if raw_version == 2:
+            return PolicySchemaVersion.V2
+
+    if isinstance(raw_version, float):
+        if raw_version == 1.0:
+            return PolicySchemaVersion.V1
+        if raw_version == 2.0:
+            return PolicySchemaVersion.V2
+
+    if isinstance(raw_version, str):
+        candidate = raw_version.strip().lower()
+        if not candidate:
+            raise ValueError("schema_version cannot be empty")
+
+        aliases = {
+            "1": PolicySchemaVersion.V1,
+            "1.0": PolicySchemaVersion.V1,
+            "v1": PolicySchemaVersion.V1,
+            "v1.0": PolicySchemaVersion.V1,
+            "2": PolicySchemaVersion.V2,
+            "2.0": PolicySchemaVersion.V2,
+            "v2": PolicySchemaVersion.V2,
+            "v2.0": PolicySchemaVersion.V2,
+        }
+        if candidate in aliases:
+            return aliases[candidate]
+
+        try:
+            return PolicySchemaVersion(candidate)
+        except ValueError as exc:
+            supported = ", ".join(item.value for item in PolicySchemaVersion)
+            raise ValueError(
+                f"unsupported schema_version '{raw_version}', expected one of: {supported}"
+            ) from exc
+
+    raise TypeError("schema_version must be an int, float, string, or PolicySchemaVersion")
+
+
 class Operator(str, Enum):
     """Supported condition operators."""
 
@@ -186,6 +232,11 @@ class PolicySchemaDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _normalize_schema_version(cls, value: Any) -> PolicySchemaVersion:
+        return _normalize_policy_schema_version(value)
+
 
 class PolicySchemaDocumentV1(PolicySchemaDocument):
     """Policy schema document for version 1.0."""
@@ -210,12 +261,7 @@ def parse_policy_document(payload: Mapping[str, Any]) -> PolicySchemaDocument:
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
 
-    raw_version = payload.get("schema_version", PolicySchemaVersion.V1.value)
-    try:
-        schema_version = PolicySchemaVersion(str(raw_version))
-    except ValueError as exc:
-        supported = ", ".join(item.value for item in PolicySchemaVersion)
-        raise ValueError(f"unsupported schema_version '{raw_version}', expected one of: {supported}") from exc
+    schema_version = _normalize_policy_schema_version(payload.get("schema_version", PolicySchemaVersion.V1))
 
     model_cls = SCHEMA_REGISTRY[schema_version]
     return model_cls.model_validate(payload)
