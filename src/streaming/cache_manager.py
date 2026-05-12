@@ -1,6 +1,4 @@
-"""Cache manager for streaming encryption performance optimizations.
-
-This module provides a standalone caching layer for:
+"""This module provides a standalone caching layer for:
 - Encrypted chunks
 - Derived keys
 
