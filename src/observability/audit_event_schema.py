@@ -191,7 +191,7 @@ class AccessEvent(AuditEvent):
         if not self.access_granted:
             if not isinstance(self.denial_reason, str) or not self.denial_reason.strip():
                 raise ValueError("denial_reason is required when access_granted is false")
-            self.denial_reason = self.denial_reason.strip()
+            object.__setattr__(self, "denial_reason", self.denial_reason.strip())
         return self
 
 
