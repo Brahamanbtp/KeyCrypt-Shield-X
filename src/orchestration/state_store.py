@@ -3,6 +3,18 @@
 This module provides a standalone async state store that prefers Redis for
 distributed coordination and falls back to local SQLite persistence when Redis
 is unavailable.
+
+Public async API (primary used by orchestrators):
+- `save_state(key: str, state: dict) -> None`
+- `load_state(key: str) -> Optional[dict]`
+- `delete_state(key: str) -> None`
+- `list_states(prefix: str) -> List[str]`
+
+Behavior:
+- Attempts Redis first (using `redis.asyncio` if present).
+- If Redis is unreachable, automatically falls back to SQLite.
+- Tracks per-key monotonically-increasing `version` on each save.
+- Stores historical versions and supports periodic snapshots into SQLite.
 """
 
 from __future__ import annotations
@@ -18,29 +30,17 @@ from typing import Any
 try:
     import redis.asyncio as redis_asyncio
     from redis.exceptions import RedisError
-except Exception:  # pragma: no cover - optional dependency boundary
+except Exception:  # pragma: no cover - optional Redis dependency
     redis_asyncio = None  # type: ignore[assignment]
 
     class RedisError(Exception):
-        """Fallback RedisError when redis dependency is unavailable."""
+        """Minimal placeholder when redis is not installed."""
 
 
 class StateStore:
     """Persist orchestration state with Redis-first backend selection.
 
-    Public methods are async and backend agnostic:
-    - save_state
-    - load_state
-    - delete_state
-    - list_states
-
-    Versioning:
-        Each successful save creates a new monotonically increasing version per
-        key and stores the historical state payload for audit/rollback support.
-
-    Snapshots:
-        Critical state keys are snapshotted periodically and all keys can also
-        be snapshotted at fixed version intervals.
+    The implementation is backend-agnostic from the caller perspective.
     """
 
     _RECORD_FORMAT_VERSION = 1
@@ -62,14 +62,13 @@ class StateStore:
             raise ValueError("snapshot_interval_seconds must be > 0")
         if snapshot_every_versions <= 0:
             raise ValueError("snapshot_every_versions must be > 0")
-        if redis_connect_timeout_seconds <= 0:
-            raise ValueError("redis_connect_timeout_seconds must be > 0")
 
         self._namespace = namespace.strip()
         self._sqlite_path = Path(sqlite_path)
         self._snapshot_interval_seconds = float(snapshot_interval_seconds)
         self._snapshot_every_versions = int(snapshot_every_versions)
         self._critical_prefixes = tuple(prefix for prefix in critical_prefixes if prefix)
+
         self._redis_url = (
             redis_url
             or os.getenv("KEYCRYPT_STATESTORE_REDIS_URL")
@@ -78,20 +77,28 @@ class StateStore:
 
         self._redis: Any | None = None
         if redis_asyncio is not None:
-            self._redis = redis_asyncio.Redis.from_url(
-                self._redis_url,
-                decode_responses=True,
-                socket_connect_timeout=float(redis_connect_timeout_seconds),
-                socket_timeout=float(redis_connect_timeout_seconds),
-            )
+            try:
+                self._redis = redis_asyncio.Redis.from_url(
+                    self._redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=float(redis_connect_timeout_seconds),
+                    socket_timeout=float(redis_connect_timeout_seconds),
+                )
+            except Exception:
+                self._redis = None
 
         self._backend_lock = asyncio.Lock()
         self._sqlite_lock = asyncio.Lock()
         self._using_redis: bool | None = None
         self._sqlite_initialized = False
 
+    # ---------------- Public API ----------------
+
     async def save_state(self, key: str, state: dict[str, Any]) -> None:
-        """Persist a state payload for a logical key."""
+        """Persist a state payload for a logical key.
+
+        Each save increments a per-key version and stores a historical copy.
+        """
         self._validate_key(key)
         self._validate_state(state)
         await self._ensure_backend_ready()
@@ -133,7 +140,7 @@ class StateStore:
         await self._delete_state_sqlite(key)
 
     async def list_states(self, prefix: str) -> list[str]:
-        """List all currently stored state keys with the provided prefix."""
+        """List currently stored state keys with the provided prefix."""
         if not isinstance(prefix, str):
             raise TypeError("prefix must be a string")
 
@@ -156,6 +163,8 @@ class StateStore:
         close = getattr(redis, "aclose", None)
         if callable(close):
             await close()
+
+    # ---------------- Backend selection / helpers ----------------
 
     async def _ensure_backend_ready(self) -> None:
         if self._using_redis is not None:
@@ -186,6 +195,8 @@ class StateStore:
             self._using_redis = False
         await self._ensure_sqlite_ready()
 
+    # ---------------- Redis implementations (if available) ----------------
+
     async def _save_state_redis(self, key: str, state: dict[str, Any]) -> None:
         redis = self._require_redis_client()
         now = time.time()
@@ -196,11 +207,7 @@ class StateStore:
 
         last_snapshot_at = await self._redis_get_last_snapshot_at(redis, key)
         snapshot_reason = self._snapshot_reason(
-            key=key,
-            state=state,
-            version=version,
-            now=now,
-            last_snapshot_at=last_snapshot_at,
+            key=key, state=state, version=version, now=now, last_snapshot_at=last_snapshot_at
         )
 
         async with redis.pipeline(transaction=True) as pipeline:
@@ -210,13 +217,7 @@ class StateStore:
             pipeline.zadd(self._redis_history_index_key(key), {str(version): now})
 
             if snapshot_reason:
-                snapshot = self._snapshot_record(
-                    key=key,
-                    state=state,
-                    version=version,
-                    snapshot_at=now,
-                    reason=snapshot_reason,
-                )
+                snapshot = self._snapshot_record(key=key, state=state, version=version, snapshot_at=now, reason=snapshot_reason)
                 pipeline.set(self._redis_snapshot_key(key, version), self._json_dump(snapshot))
                 pipeline.zadd(self._redis_snapshot_index_key(key), {str(version): now})
                 pipeline.set(self._redis_last_snapshot_at_key(key), f"{now:.6f}")
@@ -276,6 +277,17 @@ class StateStore:
         filtered = [item for item in keys if isinstance(item, str) and item.startswith(prefix)]
         filtered.sort()
         return filtered
+
+    async def _redis_get_last_snapshot_at(self, redis: Any, key: str) -> float | None:
+        raw = await redis.get(self._redis_last_snapshot_at_key(key))
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    # ---------------- SQLite implementations (fallback) ----------------
 
     async def _save_state_sqlite(self, key: str, state: dict[str, Any]) -> None:
         await self._ensure_sqlite_ready()
@@ -343,23 +355,15 @@ class StateStore:
                 )
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_state_versions_key ON state_versions(state_key)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_state_snapshots_key ON state_snapshots(state_key)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_state_versions_key ON state_versions(state_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_state_snapshots_key ON state_snapshots(state_key)")
             conn.commit()
 
     def _save_state_sqlite_sync(self, key: str, state: dict[str, Any]) -> None:
         now = time.time()
-
         with self._connect_sqlite() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT version, last_snapshot_at FROM states WHERE state_key = ?",
-                (key,),
-            ).fetchone()
+            row = conn.execute("SELECT version, last_snapshot_at FROM states WHERE state_key = ?", (key,)).fetchone()
 
             previous_version = int(row["version"]) if row is not None else 0
             version = previous_version + 1
@@ -370,38 +374,14 @@ class StateStore:
             state_record = self._state_record(state=state, version=version, timestamp=now)
             state_json = self._json_dump(state_record)
 
-            conn.execute(
-                """
-                INSERT INTO state_versions(state_key, version, state_json, changed_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (key, version, state_json, now),
-            )
+            conn.execute("INSERT INTO state_versions(state_key, version, state_json, changed_at) VALUES (?, ?, ?, ?)", (key, version, state_json, now))
 
-            snapshot_reason = self._snapshot_reason(
-                key=key,
-                state=state,
-                version=version,
-                now=now,
-                last_snapshot_at=last_snapshot_at,
-            )
+            snapshot_reason = self._snapshot_reason(key=key, state=state, version=version, now=now, last_snapshot_at=last_snapshot_at)
             next_last_snapshot_at = last_snapshot_at
 
             if snapshot_reason:
-                snapshot_record = self._snapshot_record(
-                    key=key,
-                    state=state,
-                    version=version,
-                    snapshot_at=now,
-                    reason=snapshot_reason,
-                )
-                conn.execute(
-                    """
-                    INSERT INTO state_snapshots(state_key, version, state_json, reason, snapshot_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (key, version, self._json_dump(snapshot_record), snapshot_reason, now),
-                )
+                snapshot_record = self._snapshot_record(key=key, state=state, version=version, snapshot_at=now, reason=snapshot_reason)
+                conn.execute("INSERT INTO state_snapshots(state_key, version, state_json, reason, snapshot_at) VALUES (?, ?, ?, ?, ?)", (key, version, self._json_dump(snapshot_record), snapshot_reason, now))
                 next_last_snapshot_at = now
 
             conn.execute(
@@ -421,18 +401,13 @@ class StateStore:
 
     def _load_state_sqlite_sync(self, key: str) -> dict[str, Any] | None:
         with self._connect_sqlite() as conn:
-            row = conn.execute(
-                "SELECT state_json FROM states WHERE state_key = ?",
-                (key,),
-            ).fetchone()
+            row = conn.execute("SELECT state_json FROM states WHERE state_key = ?", (key,)).fetchone()
             if row is None:
                 return None
-
             record = self._json_load_dict(row["state_json"])
             state = record.get("state")
             if not isinstance(state, dict):
                 return None
-
             return dict(state)
 
     def _delete_state_sqlite_sync(self, key: str) -> None:
@@ -447,19 +422,9 @@ class StateStore:
         with self._connect_sqlite() as conn:
             if prefix:
                 escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                cursor = conn.execute(
-                    """
-                    SELECT state_key
-                    FROM states
-                    WHERE state_key LIKE ? ESCAPE '\\'
-                    ORDER BY state_key ASC
-                    """,
-                    (f"{escaped_prefix}%",),
-                )
+                cursor = conn.execute("SELECT state_key FROM states WHERE state_key LIKE ? ESCAPE '\\' ORDER BY state_key ASC", (f"{escaped_prefix}%",))
             else:
-                cursor = conn.execute(
-                    "SELECT state_key FROM states ORDER BY state_key ASC"
-                )
+                cursor = conn.execute("SELECT state_key FROM states ORDER BY state_key ASC")
             return [str(row["state_key"]) for row in cursor.fetchall()]
 
     def _connect_sqlite(self) -> sqlite3.Connection:
@@ -468,24 +433,9 @@ class StateStore:
         conn.row_factory = sqlite3.Row
         return conn
 
-    async def _redis_get_last_snapshot_at(self, redis: Any, key: str) -> float | None:
-        raw = await redis.get(self._redis_last_snapshot_at_key(key))
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return None
+    # ---------------- Utilities / keys ----------------
 
-    def _snapshot_reason(
-        self,
-        *,
-        key: str,
-        state: dict[str, Any],
-        version: int,
-        now: float,
-        last_snapshot_at: float | None,
-    ) -> str | None:
+    def _snapshot_reason(self, *, key: str, state: dict[str, Any], version: int, now: float, last_snapshot_at: float | None) -> str | None:
         reasons: list[str] = []
         is_critical = self._is_critical_state(key=key, state=state)
 
@@ -501,47 +451,23 @@ class StateStore:
 
         if not reasons:
             return None
-
         return "+".join(reasons)
 
     def _is_critical_state(self, *, key: str, state: dict[str, Any]) -> bool:
         if any(key.startswith(prefix) for prefix in self._critical_prefixes):
             return True
-
         if bool(state.get("critical", False)):
             return True
-
         priority = state.get("priority")
         if isinstance(priority, str) and priority.strip().lower() == "critical":
             return True
-
         return False
 
     def _state_record(self, *, state: dict[str, Any], version: int, timestamp: float) -> dict[str, Any]:
-        return {
-            "format_version": self._RECORD_FORMAT_VERSION,
-            "version": int(version),
-            "updated_at": float(timestamp),
-            "state": state,
-        }
+        return {"format_version": self._RECORD_FORMAT_VERSION, "version": int(version), "updated_at": float(timestamp), "state": state}
 
-    def _snapshot_record(
-        self,
-        *,
-        key: str,
-        state: dict[str, Any],
-        version: int,
-        snapshot_at: float,
-        reason: str,
-    ) -> dict[str, Any]:
-        return {
-            "format_version": self._RECORD_FORMAT_VERSION,
-            "key": key,
-            "version": int(version),
-            "reason": reason,
-            "snapshot_at": float(snapshot_at),
-            "state": state,
-        }
+    def _snapshot_record(self, *, key: str, state: dict[str, Any], version: int, snapshot_at: float, reason: str) -> dict[str, Any]:
+        return {"format_version": self._RECORD_FORMAT_VERSION, "key": key, "version": int(version), "reason": reason, "snapshot_at": float(snapshot_at), "state": state}
 
     def _require_redis_client(self) -> Any:
         if self._redis is None:
@@ -574,7 +500,7 @@ class StateStore:
 
     @staticmethod
     def _json_dump(payload: dict[str, Any]) -> str:
-        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        return json.dumps(payload, ensure_ascii=True, separators=(',', ':'), sort_keys=True)
 
     @staticmethod
     def _json_load_dict(value: str) -> dict[str, Any]:
