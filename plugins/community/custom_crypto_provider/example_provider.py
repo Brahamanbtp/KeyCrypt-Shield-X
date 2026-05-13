@@ -1,3 +1,151 @@
+"""Educational example: simple XOR `CryptoProvider` for plugin developers.
+
+WARNING: This provider is for demonstration and testing only. XOR is
+cryptographically insecure and MUST NOT be used to protect real data.
+
+This module shows a minimal, well-documented provider implementation that
+plugin authors can copy and adapt. It intentionally keeps dependencies low
+and uses conservative runtime checks so it is safe to import inside the
+project during development and unit tests.
+
+Design notes:
+- The provider implements `CryptoProvider` to be compatible with the
+  project's orchestration layers.
+- It expects the `EncryptionContext/DecryptionContext` to provide a
+  `metadata` mapping containing a `key` entry. The key must be bytes.
+- The ciphertext format is a simple envelope: `nonce || payload` where
+  nonce is an ASCII header containing a per-operation identifier. This
+  is for demonstration only and does not provide authenticity or integrity.
+"""
+
+from __future__ import annotations
+
+import os
+import logging
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from src.abstractions.crypto_provider import CryptoProvider
+
+# The real project defines `EncryptionContext` and `DecryptionContext` types
+# in orchestration layers. For this example file we alias to Any so the
+# module remains import-safe for plugin authors before wiring contexts.
+EncryptionContext = Any
+DecryptionContext = Any
+
+
+@dataclass(frozen=True)
+class ExampleConfig:
+    """Configuration for the example provider.
+
+    Attributes:
+        provider_name: Human-friendly name used in logs.
+        enabled: When False, operations raise an error.
+    """
+
+    provider_name: str = "example-xor-provider"
+    enabled: bool = True
+
+
+class ExampleXORProvider(CryptoProvider):
+    """A tiny XOR-based CryptoProvider for educational purposes.
+
+    Security warning (again): XOR offers NO confidentiality or integrity
+    guarantees when used with predictable keys or reused keystreams. This
+    class exists purely to demonstrate how to implement the provider API.
+    """
+
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        self._logger = logging.getLogger(self.__class__.__name__)
+        raw = dict(config or {})
+        self._config = ExampleConfig(
+            provider_name=str(raw.get("provider_name", "example-xor-provider")),
+            enabled=bool(raw.get("enabled", True)),
+        )
+
+    def encrypt(self, plaintext: bytes, context: EncryptionContext) -> bytes:
+        """Encrypt plaintext using XOR with a key from `context.metadata['key']`.
+
+        Steps:
+        1. Validate `plaintext` is bytes and not empty.
+        2. Extract the `key` from `context.metadata`. The key must be bytes
+           and at least 1 byte long.
+        3. Generate a short random nonce to prefix the ciphertext. This nonce
+           is purely decorative for the example and does not add real
+           security.
+        4. XOR the plaintext with the repeating key stream and return
+           `nonce + xor_bytes`.
+        """
+        if not self._config.enabled:
+            raise RuntimeError("provider is disabled")
+
+        if not isinstance(plaintext, (bytes, bytearray)):
+            raise TypeError("plaintext must be bytes")
+        if len(plaintext) == 0:
+            raise ValueError("plaintext must be non-empty")
+
+        # Extract key from context.metadata
+        if not hasattr(context, "metadata") or not isinstance(context.metadata, Mapping):
+            raise TypeError("context must provide a metadata mapping")
+
+        key = context.metadata.get("key")
+        if not isinstance(key, (bytes, bytearray)) or len(key) == 0:
+            raise ValueError("context.metadata['key'] must be non-empty bytes")
+
+        # Nonce: short random ASCII header to demonstrate per-operation salt
+        nonce = os.urandom(8)
+
+        # Perform repeating-key XOR
+        xor_bytes = bytearray(len(plaintext))
+        key_len = len(key)
+        for i in range(len(plaintext)):
+            xor_bytes[i] = plaintext[i] ^ key[i % key_len]
+
+        # Assemble envelope: nonce || ciphertext
+        return bytes(nonce) + bytes(xor_bytes)
+
+    def decrypt(self, ciphertext: bytes, context: DecryptionContext) -> bytes:
+        """Decrypt ciphertext produced by `encrypt`.
+
+        The method expects the envelope format `nonce || xor_bytes` where the
+        nonce length is 8 bytes (as produced by `encrypt`). The nonce is
+        ignored for decryption because XOR is stateless here.
+        """
+        if not self._config.enabled:
+            raise RuntimeError("provider is disabled")
+
+        if not isinstance(ciphertext, (bytes, bytearray)):
+            raise TypeError("ciphertext must be bytes")
+        if len(ciphertext) <= 8:
+            raise ValueError("ciphertext is too short to contain nonce and payload")
+
+        if not hasattr(context, "metadata") or not isinstance(context.metadata, Mapping):
+            raise TypeError("context must provide a metadata mapping")
+
+        key = context.metadata.get("key")
+        if not isinstance(key, (bytes, bytearray)) or len(key) == 0:
+            raise ValueError("context.metadata['key'] must be non-empty bytes")
+
+        # Strip the nonce (first 8 bytes)
+        payload = ciphertext[8:]
+
+        # Reconstruct plaintext by repeating XOR with the same key
+        key_len = len(key)
+        out = bytearray(len(payload))
+        for i in range(len(payload)):
+            out[i] = payload[i] ^ key[i % key_len]
+
+        return bytes(out)
+
+    def get_algorithm_name(self) -> str:
+        return "XOR-EDU"
+
+    def get_security_level(self) -> int:
+        # Educational example has no practical security; use 0 to indicate that
+        return 0
+
+
+__all__ = ["ExampleXORProvider"]
 """Educational custom crypto provider plugin for developers.
 
 WARNING:
