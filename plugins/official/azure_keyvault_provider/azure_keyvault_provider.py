@@ -1,3 +1,269 @@
+"""Azure Key Vault plugin implementing the KeyProvider abstraction.
+
+This provider uses `azure-keyvault-keys` and `azure-identity` for
+authentication and key operations. It supports RSA and EC key creation,
+basic encryption/decryption via the `CryptographyClient` (RSA), and
+preserves Azure Key Vault native versioning semantics by returning
+provider key identifiers that include the version.
+
+Authentication is delegated to `DefaultAzureCredential` when a credential
+is not explicitly provided, enabling managed identity, service principal,
+or developer credentials via environment variables.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+try:  # pragma: no cover - optional dependency boundary
+    from azure.identity import DefaultAzureCredential
+    from azure.keyvault.keys import KeyClient
+    from azure.keyvault.keys import KeyType
+    from azure.keyvault.keys.crypto import CryptographyClient, EncryptionAlgorithm
+except Exception as exc:  # pragma: no cover - optional dependency boundary
+    DefaultAzureCredential = None  # type: ignore[assignment]
+    KeyClient = None  # type: ignore[assignment]
+    KeyType = None  # type: ignore[assignment]
+    CryptographyClient = None  # type: ignore[assignment]
+    EncryptionAlgorithm = None  # type: ignore[assignment]
+    _AZURE_IMPORT_ERROR = exc
+else:
+    _AZURE_IMPORT_ERROR = None
+
+from src.abstractions.key_provider import (
+    KeyFilter,
+    KeyGenerationParams,
+    KeyMaterial,
+    KeyMetadata,
+    KeyProvider,
+)
+
+
+def _parse_azure_key_id(key_id: str) -> Tuple[str, Optional[str]]:
+    """Parse Azure Key Vault key id into (name, version).
+
+    Accepts full key ids (https://.../keys/{name}/{version}) or simple
+    "name" or "name/version" forms.
+    """
+    if not isinstance(key_id, str) or not key_id.strip():
+        raise ValueError("key_id must be a non-empty string")
+
+    key_id = key_id.strip()
+    if key_id.startswith("https://"):
+        segments = key_id.split("/")
+        # Expect .../keys/{name}/{version}
+        try:
+            idx = segments.index("keys")
+            name = segments[idx + 1]
+            version = segments[idx + 2] if len(segments) > idx + 2 else None
+            return name, version
+        except Exception:
+            raise ValueError("malformed Azure Key Vault key id")
+
+    # support "name/version" or just "name"
+    if "/" in key_id:
+        name, version = key_id.split("/", 1)
+        return name, version or None
+    return key_id, None
+
+
+class AzureKeyVaultProvider(KeyProvider):
+    """KeyProvider implementation backed by Azure Key Vault.
+
+    Args:
+        vault_url: The base vault URL (e.g. https://my-vault.vault.azure.net)
+        credential: Optional TokenCredential; if omitted DefaultAzureCredential
+            will be used (supports managed identity and service principal).
+    """
+
+    PROVIDER_NAME = "azure-keyvault"
+    PROVIDER_VERSION = "1.0.0"
+
+    def __init__(self, *, vault_url: str, credential: Any | None = None) -> None:
+        if KeyClient is None:
+            reason = f": {_AZURE_IMPORT_ERROR}" if _AZURE_IMPORT_ERROR is not None else ""
+            raise RuntimeError(f"AzureKeyVaultProvider requires azure packages{reason}")
+
+        if not isinstance(vault_url, str) or not vault_url.strip():
+            raise ValueError("vault_url must be provided")
+
+        self.vault_url = vault_url.strip()
+        self.credential = credential or DefaultAzureCredential()
+        self._key_client = KeyClient(self.vault_url, self.credential)
+
+    def generate_key(self, params: KeyGenerationParams) -> str:
+        if not isinstance(params, KeyGenerationParams):
+            raise TypeError("params must be KeyGenerationParams")
+
+        # Resolve key name: caller may provide a name via metadata, otherwise generate one
+        key_name = str(params.metadata.get("name", "")).strip() or f"kc-{uuid.uuid4().hex[:12]}"
+
+        # Choose key type from params.algorithm or metadata
+        alg = str(params.algorithm or "").upper()
+        kty_hint = str(params.metadata.get("kty", "")).lower()
+
+        if "RSA" in alg or kty_hint == "rsa":
+            size_bits = (params.key_size_bytes * 8) if params.key_size_bytes else 2048
+            created = self._key_client.create_rsa_key(key_name, size=int(size_bits), hardware_protected=bool(params.hardware_backed))
+        elif "EC" in alg or kty_hint == "ec":
+            curve = str(params.metadata.get("curve", "P-256"))
+            created = self._key_client.create_ec_key(key_name, curve=curve, hardware_protected=bool(params.hardware_backed))
+        else:
+            # Default to RSA when unspecified
+            size_bits = (params.key_size_bytes * 8) if params.key_size_bytes else 2048
+            created = self._key_client.create_rsa_key(key_name, size=int(size_bits), hardware_protected=bool(params.hardware_backed))
+
+        if not getattr(created, "id", None):
+            raise RuntimeError("failed to create key in Azure Key Vault")
+
+        return str(created.id)
+
+    def get_key(self, key_id: str) -> KeyMaterial:
+        name, version = _parse_azure_key_id(key_id)
+        try:
+            key = self._key_client.get_key(name, version)
+        except Exception as exc:
+            raise RuntimeError(f"failed to retrieve key from Azure Key Vault: {exc}") from exc
+
+        k = key.key
+        algorithm = getattr(k, "kty", "unknown")
+
+        metadata: Dict[str, Any] = {
+            "vault_url": self.vault_url,
+            "name": key.name,
+            "version_id": getattr(key.properties, "version", None),
+            "exportable": False,
+            "kty": getattr(k, "kty", None),
+            "crv": getattr(k, "crv", None),
+        }
+
+        # Azure Key Vault typically does not expose raw private material; leave material empty
+        return KeyMaterial(key_id=str(key.id), algorithm=str(algorithm), material=b"", version=1, metadata=metadata)
+
+    def rotate_key(self, key_id: str) -> str:
+        # Create a new key version by re-creating the key with the same name and type
+        name, _ = _parse_azure_key_id(key_id)
+        try:
+            existing = self._key_client.get_key(name)
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch existing key for rotation: {exc}") from exc
+
+        k = existing.key
+        kty = getattr(k, "kty", "RSA").upper()
+
+        if "RSA" in kty:
+            # Use same size if available, otherwise default
+            size = getattr(k, "n", None)
+            # Azure JsonWebKey exposes `n` as bytes; size detection is best-effort
+            new = self._key_client.create_rsa_key(name)
+        elif "EC" in kty or getattr(k, "crv", None) is not None:
+            curve = getattr(k, "crv", "P-256")
+            new = self._key_client.create_ec_key(name, curve=curve)
+        else:
+            new = self._key_client.create_rsa_key(name)
+
+        if not getattr(new, "id", None):
+            raise RuntimeError("rotation failed: new key version not created")
+
+        return str(new.id)
+
+    def list_keys(self, filter: Optional[KeyFilter]) -> List[KeyMetadata]:
+        key_filter = filter or KeyFilter()
+        if not isinstance(key_filter, KeyFilter):
+            raise TypeError("filter must be KeyFilter or None")
+
+        items: List[KeyMetadata] = []
+        try:
+            properties = self._key_client.list_properties_of_keys()
+        except Exception as exc:
+            raise RuntimeError(f"failed to list keys: {exc}") from exc
+
+        for prop in properties:
+            algorithm = "unknown"
+            try:
+                created_at = float(prop.created_on.timestamp()) if prop.created_on is not None else time.time()
+            except Exception:
+                created_at = time.time()
+
+            # filter by algorithm if requested (best-effort; underlying type may require fetch)
+            if key_filter.algorithm:
+                # fetch full key to determine type
+                try:
+                    k = self._key_client.get_key(prop.name)
+                    algorithm = getattr(k.key, "kty", "unknown")
+                except Exception:
+                    algorithm = "unknown"
+
+                if algorithm.lower() != key_filter.algorithm.lower():
+                    continue
+
+            items.append(
+                KeyMetadata(
+                    key_id=str(prop.id),
+                    algorithm=str(algorithm),
+                    provider="azure-keyvault",
+                    version=1,
+                    created_at=created_at,
+                    expires_at=float(prop.expires_on.timestamp()) if getattr(prop, "expires_on", None) is not None else None,
+                    status="active",
+                    tags=dict(prop.tags or {}),
+                    metadata={"name": prop.name},
+                )
+            )
+
+            if key_filter.limit is not None and key_filter.limit > 0 and len(items) >= key_filter.limit:
+                break
+
+        return items
+
+    def encrypt(self, key_id: str, plaintext: bytes) -> bytes:
+        if not isinstance(plaintext, (bytes, bytearray)) or len(plaintext) == 0:
+            raise ValueError("plaintext must be non-empty bytes")
+
+        name, version = _parse_azure_key_id(key_id)
+        try:
+            key = self._key_client.get_key(name, version)
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch key for encryption: {exc}") from exc
+
+        if CryptographyClient is None:
+            raise RuntimeError("azure.keyvault.keys.crypto.CryptographyClient is not available")
+
+        crypto = CryptographyClient(key.id, self.credential)
+
+        # Prefer RSA-OAEP for RSA keys
+        try:
+            result = crypto.encrypt(EncryptionAlgorithm.rsa_oaep, bytes(plaintext))
+            return bytes(result.ciphertext)
+        except Exception as exc:
+            raise RuntimeError(f"encryption failed: {exc}") from exc
+
+    def decrypt(self, key_id: str, ciphertext: bytes) -> bytes:
+        if not isinstance(ciphertext, (bytes, bytearray)) or len(ciphertext) == 0:
+            raise ValueError("ciphertext must be non-empty bytes")
+
+        name, version = _parse_azure_key_id(key_id)
+        try:
+            key = self._key_client.get_key(name, version)
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch key for decryption: {exc}") from exc
+
+        if CryptographyClient is None:
+            raise RuntimeError("azure.keyvault.keys.crypto.CryptographyClient is not available")
+
+        crypto = CryptographyClient(key.id, self.credential)
+        try:
+            result = crypto.decrypt(EncryptionAlgorithm.rsa_oaep, bytes(ciphertext))
+            return bytes(result.plaintext)
+        except Exception as exc:
+            raise RuntimeError(f"decryption failed: {exc}") from exc
+
+
+__all__ = ["AzureKeyVaultProvider"]
 """Azure Key Vault provider plugin implementing KeyProvider.
 
 This provider integrates Azure Key Vault key operations while preserving the
