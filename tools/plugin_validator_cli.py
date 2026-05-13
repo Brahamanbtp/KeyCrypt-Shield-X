@@ -1,4 +1,293 @@
 #!/usr/bin/env python3
+"""Plugin validation CLI for KeyCrypt pre-publish checks.
+
+Commands:
+- plugin-validator validate <plugin_path>
+- plugin-validator test <plugin_path>
+- plugin-validator package <plugin_path>
+- plugin-validator sign <plugin_path> --key <signing_key>
+
+The tool performs manifest and code validation, runs tests, packages the
+plugin directory into a distributable archive, and signs packages using
+HMAC-SHA256 when a shared signing key is provided.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import shutil
+import subprocess
+import tarfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
+
+import click
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.registry.plugin_manifest import PluginManifest
+from src.registry.provider_registry import ProviderRegistry
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("plugin-validator")
+
+
+@dataclass
+class ValidationResult:
+    passed: bool
+    errors: List[str]
+    warnings: List[str]
+
+
+def validate_manifest(plugin_dir: Path) -> Tuple[bool, List[str]]:
+    errors: List[str] = []
+    manifest_path = plugin_dir / "plugin.yaml"
+    if not manifest_path.exists():
+        errors.append("plugin.yaml not found")
+        return False, errors
+
+    try:
+        manifest = PluginManifest.from_yaml(manifest_path)
+    except Exception as exc:
+        errors.append(f"failed to parse manifest: {exc}")
+        return False, errors
+
+    if not manifest.provides:
+        errors.append("manifest 'provides' is empty")
+
+    # Basic dependency check: avoid empty dependency entries
+    if getattr(manifest, "dependencies", None) is None:
+        # not required, but warn
+        logger.debug("manifest has no dependencies field")
+
+    return (len(errors) == 0), errors
+
+
+def validate_provider_code(plugin_dir: Path) -> Tuple[bool, List[str]]:
+    errors: List[str] = []
+    # discover provider files: look for provider.py or files under plugin package
+    provider_py = plugin_dir / "provider.py"
+    if not provider_py.exists():
+        # try scanning for any .py with a Provider class
+        found = False
+        for p in plugin_dir.rglob("*.py"):
+            if p.name == "provider.py":
+                provider_py = p
+                found = True
+                break
+        if not found:
+            errors.append("provider.py not found in plugin directory")
+            return False, errors
+
+    try:
+        spec = __import__("importlib.util")
+        import importlib.util as il
+
+        spec = il.spec_from_file_location("generated_plugin_module", str(provider_py))
+        if spec is None or spec.loader is None:
+            raise RuntimeError("unable to create module spec for provider")
+        module = il.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        errors.append(f"failed to import provider module: {exc}")
+        return False, errors
+
+    # find provider class (heuristic: any class ending with Provider)
+    provider_class = None
+    for name, obj in vars(module).items():
+        if isinstance(obj, type) and name.endswith("Provider"):
+            provider_class = obj
+            break
+
+    if provider_class is None:
+        errors.append("no provider class ending with 'Provider' found in provider module")
+        return False, errors
+
+    # validate against registry
+    try:
+        registry = ProviderRegistry()
+        validation = registry.validate_provider(provider_class)
+        if not validation.is_valid:
+            errors.extend(validation.errors)
+            return False, errors
+    except Exception as exc:
+        errors.append(f"provider validation failed: {exc}")
+        return False, errors
+
+    return True, errors
+
+
+def run_tests(plugin_dir: Path) -> Tuple[bool, str]:
+    # Run pytest in the plugin_dir; capture stdout/stderr
+    cmd = [shutil.which("pytest") or "pytest", "-q", str(plugin_dir)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except Exception as exc:
+        return False, f"failed to run pytest: {exc}"
+
+    out = proc.stdout + "\n" + proc.stderr
+    passed = proc.returncode == 0
+    return passed, out
+
+
+def create_package(plugin_dir: Path, out_dir: Optional[Path] = None) -> Path:
+    out_dir = out_dir or (plugin_dir / "dist")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = plugin_dir.name
+    archive_name = f"{name}.tar.gz"
+    archive_path = out_dir / archive_name
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(plugin_dir, arcname=name)
+    return archive_path
+
+
+def sign_package(package_path: Path, key: str) -> Path:
+    # key can be a path to a file or raw key string
+    key_path = Path(key)
+    if key_path.exists():
+        secret = key_path.read_bytes()
+    else:
+        secret = key.encode("utf-8")
+
+    mac = hmac.new(secret, digestmod=hashlib.sha256)
+    with package_path.open("rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            mac.update(chunk)
+
+    sig = mac.hexdigest()
+    sig_path = package_path.with_suffix(package_path.suffix + ".sig")
+    sig_path.write_text(sig, encoding="utf-8")
+    return sig_path
+
+
+@click.group()
+def cli() -> None:
+    """Plugin validator CLI for pre-publish checks."""
+
+
+@cli.command()
+@click.argument("plugin_path", type=click.Path(exists=True, file_okay=False))
+def validate(plugin_path: str) -> None:
+    """Run validation checks against a plugin directory."""
+    plugin_dir = Path(plugin_path)
+    logger.info("Validating plugin at %s", plugin_dir)
+
+    all_errors: List[str] = []
+    all_warnings: List[str] = []
+
+    ok_manifest, manifest_errors = validate_manifest(plugin_dir)
+    if not ok_manifest:
+        all_errors.extend(manifest_errors)
+
+    ok_code, code_errors = validate_provider_code(plugin_dir)
+    if not ok_code:
+        all_errors.extend(code_errors)
+
+    # Basic README check
+    readme = plugin_dir / "README.md"
+    if not readme.exists():
+        all_warnings.append("missing README.md")
+
+    if all_errors:
+        logger.error("Validation failed with errors:")
+        for e in all_errors:
+            logger.error(" - %s", e)
+        raise click.Abort()
+
+    logger.info("Validation passed with warnings: %s", all_warnings)
+
+
+@cli.command()
+@click.argument("plugin_path", type=click.Path(exists=True, file_okay=False))
+def test(plugin_path: str) -> None:
+    """Run plugin tests using pytest."""
+    plugin_dir = Path(plugin_path)
+    logger.info("Running tests for plugin at %s", plugin_dir)
+    passed, output = run_tests(plugin_dir)
+    click.echo(output)
+    if not passed:
+        logger.error("Tests failed")
+        raise click.Abort()
+    logger.info("All tests passed")
+
+
+@cli.command()
+@click.argument("plugin_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--out-dir", type=click.Path(file_okay=False), default=None, help="Output directory for package")
+def package(plugin_path: str, out_dir: Optional[str]) -> None:
+    """Package plugin directory into a distributable tar.gz archive."""
+    plugin_dir = Path(plugin_path)
+    out_path = Path(out_dir) if out_dir else None
+    logger.info("Creating package for %s", plugin_dir)
+    try:
+        pkg = create_package(plugin_dir, out_path)
+    except Exception as exc:
+        logger.error("Packaging failed: %s", exc)
+        raise click.Abort()
+    logger.info("Package created: %s", pkg)
+    click.echo(str(pkg))
+
+
+@cli.command()
+@click.argument("plugin_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--key", required=True, help="Signing key path or raw key string")
+def sign(plugin_path: str, key: str) -> None:
+    """Sign the packaged plugin using HMAC-SHA256 and provided key."""
+    plugin_dir = Path(plugin_path)
+    dist = plugin_dir / "dist"
+    if not dist.exists():
+        logger.info("dist directory not found, creating package first")
+        try:
+            pkg = create_package(plugin_dir)
+        except Exception as exc:
+            logger.error("Failed to create package: %s", exc)
+            raise click.Abort()
+    else:
+        # pick latest .tar.gz by mtime
+        tgz_files = sorted(dist.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not tgz_files:
+            logger.info("no existing package found, creating one")
+            pkg = create_package(plugin_dir)
+        else:
+            pkg = tgz_files[0]
+
+    try:
+        sig = sign_package(pkg, key)
+    except Exception as exc:
+        logger.error("Signing failed: %s", exc)
+        raise click.Abort()
+
+    logger.info("Signature written to %s", sig)
+    click.echo(str(sig))
+
+
+def main() -> int:
+    try:
+        cli()
+    except click.Abort:
+        return 2
+    except Exception as exc:
+        logger.exception("Unhandled error: %s", exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#!/usr/bin/env python3
 """Plugin pre-publish validation CLI.
 
 Commands:
