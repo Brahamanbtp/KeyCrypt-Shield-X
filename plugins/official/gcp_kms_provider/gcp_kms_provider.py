@@ -1,3 +1,331 @@
+"""Google Cloud KMS plugin implementing the KeyProvider abstraction.
+
+Uses `google-cloud-kms` for key management and encryption operations. The
+provider supports symmetric keys (ENCRYPT_DECRYPT) and asymmetric keys for
+encryption or signing. Key rings are created on-demand when generating keys.
+
+Authentication is delegated to the environment (service account credentials)
+or an explicit client passed to the constructor.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+try:  # pragma: no cover - optional dependency boundary
+    from google.cloud import kms_v1
+    from google.api_core import exceptions as gcloud_exceptions
+except Exception as exc:  # pragma: no cover - optional dependency boundary
+    kms_v1 = None  # type: ignore[assignment]
+    gcloud_exceptions = None  # type: ignore[assignment]
+    _GCP_IMPORT_ERROR = exc
+else:
+    _GCP_IMPORT_ERROR = None
+
+from src.abstractions.key_provider import (
+    KeyFilter,
+    KeyGenerationParams,
+    KeyMaterial,
+    KeyMetadata,
+    KeyProvider,
+)
+
+
+def _parse_gcp_key_id(key_id: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    """Parse GCP KMS key id into (project, location, key_ring, crypto_key[, version]).
+
+    Accepts full resource names or short forms like "key_ring/crypto_key" or
+    "crypto_key" when the provider was constructed with defaults.
+    Returned fields may be None if not present in the provided id.
+    """
+    if not isinstance(key_id, str) or not key_id.strip():
+        raise ValueError("key_id must be a non-empty string")
+
+    parts = key_id.strip().split("/")
+    # Full resource name begins with "projects"
+    if parts[0] == "projects":
+        # projects/{project}/locations/{loc}/keyRings/{ring}/cryptoKeys/{key}[/cryptoKeyVersions/{ver}]
+        try:
+            project = parts[1]
+            location = parts[3]
+            ring = parts[5]
+            key = parts[7]
+            version = None
+            if len(parts) > 9 and parts[8] == "cryptoKeyVersions":
+                version = parts[9]
+            return project, location, ring, key if version is None else f"{key}/{version}"
+        except Exception:
+            raise ValueError("malformed GCP KMS key id")
+
+    # support "key_ring/crypto_key" or "crypto_key"
+    if "/" in key_id:
+        ring, key = key_id.split("/", 1)
+        return None, None, ring, key
+    return None, None, None, key_id
+
+
+class GCPKMSProvider(KeyProvider):
+    """KeyProvider implementation backed by Google Cloud KMS.
+
+    Args:
+        project_id: Default GCP project id to operate in.
+        location: Default location (e.g. "global" or "us-east1").
+        key_ring: Default key ring name to use when creating keys.
+        client: Optional pre-created `KeyManagementServiceClient` instance.
+    """
+
+    PROVIDER_NAME = "gcp-kms"
+    PROVIDER_VERSION = "1.0.0"
+
+    def __init__(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        location: str = "global",
+        key_ring: str = "keycrypt",
+        client: Any | None = None,
+    ) -> None:
+        if kms_v1 is None:
+            reason = f": {_GCP_IMPORT_ERROR}" if _GCP_IMPORT_ERROR is not None else ""
+            raise RuntimeError(f"GCP KMS provider requires google-cloud-kms{reason}")
+
+        self.project_id = project_id
+        self.location = location
+        self.key_ring = key_ring
+
+        if client is not None:
+            self._client = client
+        else:
+            self._client = kms_v1.KeyManagementServiceClient()
+
+    def _key_ring_parent(self, project: Optional[str] = None, location: Optional[str] = None) -> str:
+        proj = project or self.project_id
+        loc = location or self.location
+        if not proj:
+            raise ValueError("project_id must be provided either to provider or in key_id")
+        return f"projects/{proj}/locations/{loc}"
+
+    def _ensure_key_ring(self, project: str, location: str, ring: str) -> None:
+        parent = self._key_ring_parent(project, location)
+        name = f"{parent}/keyRings/{ring}"
+        try:
+            # Attempt to get the key ring; if it exists this is a no-op
+            self._client.get_key_ring(name=name)
+            return
+        except Exception:
+            pass
+
+        try:
+            self._client.create_key_ring(parent=parent, key_ring_id=ring, key_ring={})
+        except Exception as exc:
+            # ignore already exists race
+            if gcloud_exceptions and isinstance(exc, gcloud_exceptions.AlreadyExists):
+                return
+            # other exceptions should surface
+            raise
+
+    def generate_key(self, params: KeyGenerationParams) -> str:
+        if not isinstance(params, KeyGenerationParams):
+            raise TypeError("params must be KeyGenerationParams")
+
+        project = params.metadata.get("project") or self.project_id
+        location = params.metadata.get("location") or self.location
+        ring = params.metadata.get("key_ring") or self.key_ring
+
+        if not project:
+            raise ValueError("project_id must be provided via provider or params.metadata['project']")
+
+        # ensure the key ring exists
+        self._ensure_key_ring(project, location, ring)
+
+        parent = f"projects/{project}/locations/{location}/keyRings/{ring}"
+
+        # key id/name
+        key_id = str(params.metadata.get("name") or f"kc-{uuid.uuid4().hex[:12]}")
+
+        # decide purpose and algorithm mapping
+        alg = str(params.algorithm or "").upper()
+        purpose = kms_v1.CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT
+        version_template: Dict[str, Any] = {}
+
+        if "RSA" in alg and "SIGN" in alg:
+            purpose = kms_v1.CryptoKey.CryptoKeyPurpose.ASYMMETRIC_SIGN
+            version_template = {"algorithm": kms_v1.CryptoKeyVersion.CryptoKeyVersionAlgorithm.RSA_SIGN_PKCS1_2048_SHA256}
+        elif "RSA" in alg and "ENCRYPT" in alg:
+            purpose = kms_v1.CryptoKey.CryptoKeyPurpose.ASYMMETRIC_DECRYPT
+            version_template = {"algorithm": kms_v1.CryptoKeyVersion.CryptoKeyVersionAlgorithm.RSA_DECRYPT_OAEP_2048}
+        elif "EC" in alg or alg.startswith("ECDSA"):
+            purpose = kms_v1.CryptoKey.CryptoKeyPurpose.ASYMMETRIC_SIGN
+            version_template = {"algorithm": kms_v1.CryptoKeyVersion.CryptoKeyVersionAlgorithm.EC_SIGN_P256_SHA256}
+        else:
+            purpose = kms_v1.CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT
+
+        crypto_key = {"purpose": purpose}
+        if version_template:
+            crypto_key["version_template"] = version_template
+
+        try:
+            created = self._client.create_crypto_key(parent=parent, crypto_key_id=key_id, crypto_key=crypto_key)
+        except Exception as exc:
+            raise RuntimeError(f"failed to create crypto key: {exc}") from exc
+
+        return str(created.name)
+
+    def get_key(self, key_id: str) -> KeyMaterial:
+        project, location, ring, key = _parse_gcp_key_id(key_id)
+        # if project/location/ring not provided, use defaults
+        if not ring:
+            ring = self.key_ring
+        if not project:
+            project = self.project_id
+        if not project:
+            raise ValueError("project_id must be provided either to provider or in key_id")
+
+        name = f"projects/{project}/locations/{location or self.location}/keyRings/{ring}/cryptoKeys/{key}"
+        try:
+            ck = self._client.get_crypto_key(name=name)
+        except Exception as exc:
+            raise RuntimeError(f"failed to retrieve crypto key: {exc}") from exc
+
+        purpose = getattr(ck, "purpose", "UNKNOWN")
+        metadata = {
+            "name": ck.name,
+            "purpose": str(purpose),
+            "primary": getattr(ck, "primary", None).name if getattr(ck, "primary", None) is not None else None,
+        }
+
+        return KeyMaterial(key_id=str(ck.name), algorithm=str(purpose), material=b"", version=1, metadata=metadata)
+
+    def rotate_key(self, key_id: str) -> str:
+        # Rotation in Cloud KMS is creating a new CryptoKeyVersion; use create_crypto_key_version
+        project, location, ring, key = _parse_gcp_key_id(key_id)
+        if not ring:
+            ring = self.key_ring
+        if not project:
+            project = self.project_id
+        if not project:
+            raise ValueError("project_id must be provided either to provider or in key_id")
+
+        parent = f"projects/{project}/locations/{location or self.location}/keyRings/{ring}/cryptoKeys/{key}"
+        try:
+            new_version = self._client.create_crypto_key_version(parent=parent, crypto_key_version={})
+        except Exception as exc:
+            raise RuntimeError(f"failed to create new crypto key version: {exc}") from exc
+
+        return str(new_version.name)
+
+    def list_keys(self, filter: Optional[KeyFilter]) -> List[KeyMetadata]:
+        key_filter = filter or KeyFilter()
+        if not isinstance(key_filter, KeyFilter):
+            raise TypeError("filter must be KeyFilter or None")
+
+        if not self.project_id:
+            raise ValueError("project_id must be configured on the provider for listing keys")
+
+        parent = f"projects/{self.project_id}/locations/{self.location}/keyRings/{self.key_ring}"
+        items: List[KeyMetadata] = []
+        try:
+            for prop in self._client.list_crypto_keys(parent=parent):
+                created_at = float(prop.create_time.seconds) if getattr(prop, "create_time", None) is not None else time.time()
+                algorithm = getattr(prop, "purpose", "UNKNOWN")
+
+                if key_filter.algorithm and str(algorithm).lower() != key_filter.algorithm.lower():
+                    continue
+
+                items.append(
+                    KeyMetadata(
+                        key_id=str(prop.name),
+                        algorithm=str(algorithm),
+                        provider="gcp-kms",
+                        version=1,
+                        created_at=created_at,
+                        expires_at=None,
+                        status="active",
+                        tags=dict(getattr(prop, "labels", {}) or {}),
+                        metadata={"primary": getattr(prop, "primary", None).name if getattr(prop, "primary", None) is not None else None},
+                    )
+                )
+
+                if key_filter.limit is not None and key_filter.limit > 0 and len(items) >= key_filter.limit:
+                    break
+        except Exception as exc:
+            raise RuntimeError(f"failed to list keys: {exc}") from exc
+
+        return items
+
+    def encrypt(self, key_id: str, plaintext: bytes) -> bytes:
+        if not isinstance(plaintext, (bytes, bytearray)) or len(plaintext) == 0:
+            raise ValueError("plaintext must be non-empty bytes")
+
+        project, location, ring, key = _parse_gcp_key_id(key_id)
+        if not ring:
+            ring = self.key_ring
+        if not project:
+            project = self.project_id
+        if not project:
+            raise ValueError("project_id must be provided either to provider or in key_id")
+
+        crypto_key_name = f"projects/{project}/locations/{location or self.location}/keyRings/{ring}/cryptoKeys/{key}"
+        try:
+            ck = self._client.get_crypto_key(name=crypto_key_name)
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch crypto key for encrypt: {exc}") from exc
+
+        purpose = ck.purpose
+        try:
+            if purpose == kms_v1.CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT:
+                resp = self._client.encrypt(request={"name": crypto_key_name, "plaintext": bytes(plaintext)})
+                return bytes(resp.ciphertext)
+            elif purpose == kms_v1.CryptoKey.CryptoKeyPurpose.ASYMMETRIC_DECRYPT:
+                # use primary version for asymmetric operations
+                version_name = getattr(ck.primary, "name", None)
+                if not version_name:
+                    raise RuntimeError("crypto key has no primary version for asymmetric operations")
+                resp = self._client.asymmetric_decrypt(request={"name": version_name, "ciphertext": bytes(plaintext)})
+                return bytes(resp.plaintext)
+            else:
+                raise RuntimeError(f"unsupported key purpose for encryption: {purpose}")
+        except Exception as exc:
+            raise RuntimeError(f"encryption failed: {exc}") from exc
+
+    def decrypt(self, key_id: str, ciphertext: bytes) -> bytes:
+        if not isinstance(ciphertext, (bytes, bytearray)) or len(ciphertext) == 0:
+            raise ValueError("ciphertext must be non-empty bytes")
+
+        project, location, ring, key = _parse_gcp_key_id(key_id)
+        if not ring:
+            ring = self.key_ring
+        if not project:
+            project = self.project_id
+        if not project:
+            raise ValueError("project_id must be provided either to provider or in key_id")
+
+        crypto_key_name = f"projects/{project}/locations/{location or self.location}/keyRings/{ring}/cryptoKeys/{key}"
+        try:
+            ck = self._client.get_crypto_key(name=crypto_key_name)
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch crypto key for decrypt: {exc}") from exc
+
+        purpose = ck.purpose
+        try:
+            if purpose == kms_v1.CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT:
+                resp = self._client.decrypt(request={"name": crypto_key_name, "ciphertext": bytes(ciphertext)})
+                return bytes(resp.plaintext)
+            elif purpose == kms_v1.CryptoKey.CryptoKeyPurpose.ASYMMETRIC_DECRYPT:
+                version_name = getattr(ck.primary, "name", None)
+                if not version_name:
+                    raise RuntimeError("crypto key has no primary version for asymmetric operations")
+                resp = self._client.asymmetric_decrypt(request={"name": version_name, "ciphertext": bytes(ciphertext)})
+                return bytes(resp.plaintext)
+            else:
+                raise RuntimeError(f"unsupported key purpose for decryption: {purpose}")
+        except Exception as exc:
+            raise RuntimeError(f"decryption failed: {exc}") from exc
+
+
+__all__ = ["GCPKMSProvider"]
 """Google Cloud KMS provider plugin implementing KeyProvider.
 
 This provider integrates Google Cloud KMS while preserving KeyProvider
