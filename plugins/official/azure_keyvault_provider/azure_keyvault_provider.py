@@ -14,10 +14,12 @@ or developer credentials via environment variables.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 try:  # pragma: no cover - optional dependency boundary
     from azure.identity import DefaultAzureCredential
@@ -264,29 +266,6 @@ class AzureKeyVaultProvider(KeyProvider):
 
 
 __all__ = ["AzureKeyVaultProvider"]
-"""Azure Key Vault provider plugin implementing KeyProvider.
-
-This provider integrates Azure Key Vault key operations while preserving the
-`KeyProvider` abstraction contract expected by KeyCrypt.
-
-Authentication modes:
-- default: `DefaultAzureCredential`
-- managed_identity: `ManagedIdentityCredential`
-- service_principal: `ClientSecretCredential`
-
-Versioning:
-- Azure Key Vault native key versioning is supported via `list_key_versions`
-  and by allowing `key_id` references in `<name>/<version>` or full key URL
-  formats.
-"""
-
-from __future__ import annotations
-
-import re
-import time
-from datetime import datetime
-from typing import Any, Callable, Mapping, Optional
-from urllib.parse import urlparse
 
 try:  # pragma: no cover - optional dependency boundary
     from azure.identity import ClientSecretCredential, DefaultAzureCredential, ManagedIdentityCredential
