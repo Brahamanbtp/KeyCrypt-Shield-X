@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycrypt.configMapName" . }}
+  labels:
+    {{- include "keycrypt.labels" . | nindent 4 }}
+data:
+  {{- if .Values.config.policies }}
+  policies.yaml: |
+    {{- toYaml .Values.config.policies | nindent 4 }}
+  {{- else }}
+  policies.yaml: |
+    # Default policies configuration
+    default_algorithm: "AES-256-XTS"
+    key_rotation_interval: 3600
+  {{- end }}
