@@ -326,28 +326,6 @@ class GCPKMSProvider(KeyProvider):
 
 
 __all__ = ["GCPKMSProvider"]
-"""Google Cloud KMS provider plugin implementing KeyProvider.
-
-This provider integrates Google Cloud KMS while preserving KeyProvider
-abstraction semantics expected by KeyCrypt.
-
-Authentication:
-- Application Default Credentials (default)
-- Service account file
-- Service account info payload
-
-Key organization:
-- Key ring management helpers for creating/listing rings.
-
-Asymmetric support:
-- Asymmetric signing key generation (RSA/EC variants)
-- Public key retrieval and asymmetric sign helper operations
-"""
-
-from __future__ import annotations
-
-import re
-import time
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
