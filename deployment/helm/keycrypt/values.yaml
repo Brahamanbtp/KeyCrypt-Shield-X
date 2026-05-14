@@ -1,0 +1,150 @@
+# Default values for KeyCrypt Helm deployment
+# Declare variables to be passed into templates
+
+# Number of replicas (used when autoscaling is disabled)
+replicaCount: 2
+
+# Image configuration
+image:
+  registry: docker.io
+  repository: keycrypt/keycrypt
+  # Overrides the image tag (defaults to Chart.appVersion)
+  tag: null
+  # Image digest for immutable image pinning (takes precedence over tag)
+  digest: null
+  pullPolicy: IfNotPresent
+
+# Image pull secrets for private registries
+imagePullSecrets: []
+
+# Name overrides
+nameOverride: ""
+fullnameOverride: ""
+
+# Common labels to add to all resources
+commonLabels: {}
+
+# Service Account configuration
+serviceAccount:
+  create: true
+  name: null
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+  annotations: {}
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: keycrypt.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: keycrypt-tls
+      hosts:
+        - keycrypt.example.com
+
+# Resource requests and limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+
+# Health check configuration
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+# Persistence configuration for key storage
+persistence:
+  enabled: true
+  # Use existing PVC instead of creating a new one
+  existingClaim: null
+  storageClassName: standard
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /app/data
+
+# Configuration for policies and encryption settings
+config:
+  policies: {}
+  # Example:
+  #   default_algorithm: "AES-256-XTS"
+  #   key_rotation_interval: 3600
+
+# Environment variables
+env:
+  - name: APP_ENV
+    value: "production"
+  - name: KEYCRYPT_LOG_LEVEL
+    value: "INFO"
+  - name: KEYCRYPT_ENABLE_METRICS
+    value: "true"
+
+# Node affinity and scheduling
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# Additional volumes
+volumes: []
+
+# Additional volume mounts
+volumeMounts: []
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9100"
+  prometheus.io/path: "/metrics"
+
+# Pod labels
+podLabels: {}
