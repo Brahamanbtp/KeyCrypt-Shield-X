@@ -100,3 +100,18 @@ def test_compare_profile_results_reports_deltas() -> None:
     assert comparison.duration_after > 0
     assert comparison.speedup_ratio > 0
     assert isinstance(comparison.total_calls_delta, int)
+
+
+def test_generate_comparison_report_writes_markdown(tmp_path: Path) -> None:
+    module = _load_performance_profiler_module()
+
+    before = module.profile_function(_cpu_bound_workload, 10000)
+    after = module.profile_function(_cpu_bound_workload, 5000)
+    output_path = tmp_path / "comparison_report.md"
+
+    report = module.generate_comparison_report(before, after, output_path)
+
+    assert output_path.exists()
+    assert report.startswith("# Performance Comparison Report")
+    assert "Improved Functions" in report
+    assert "Regressed Functions" in report
