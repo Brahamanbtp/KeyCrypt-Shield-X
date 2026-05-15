@@ -494,6 +494,63 @@ def compare_profile_results(before: ProfileResult, after: ProfileResult) -> Prof
     )
 
 
+def generate_comparison_report(
+    before: ProfileResult,
+    after: ProfileResult,
+    output_path: Path | None = None,
+) -> str:
+    """Generate a Markdown report for before/after optimization profiling.
+
+    When ``output_path`` is provided, the report is also written to disk.
+    """
+    comparison = compare_profile_results(before, after)
+
+    def _format_function_deltas(items: tuple[FunctionDelta, ...]) -> str:
+        if not items:
+            return "- None"
+
+        return "\n".join(
+            f"- {item.function_name}: {item.before_cumulative_time:.6f}s -> {item.after_cumulative_time:.6f}s "
+            f"(delta {item.delta_cumulative_time:+.6f}s)"
+            for item in items
+        )
+
+    report = textwrap.dedent(
+        f"""
+        # Performance Comparison Report
+
+        ## Summary
+
+        - Before target: {comparison.before_target}
+        - After target: {comparison.after_target}
+        - Before duration: {comparison.duration_before:.6f}s
+        - After duration: {comparison.duration_after:.6f}s
+        - Duration delta: {comparison.duration_delta:+.6f}s
+        - Speedup ratio: {comparison.speedup_ratio:.3f}x
+        - Calls before: {comparison.total_calls_before}
+        - Calls after: {comparison.total_calls_after}
+        - Calls delta: {comparison.total_calls_delta:+d}
+
+        ## Improved Functions
+
+        {_format_function_deltas(comparison.improved_functions)}
+
+        ## Regressed Functions
+
+        {_format_function_deltas(comparison.regressed_functions)}
+        """
+    ).strip()
+
+    rendered = report + "\n"
+
+    if output_path is not None:
+        target = Path(output_path).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered, encoding="utf-8")
+
+    return rendered
+
+
 __all__ = [
     "Bottleneck",
     "FunctionDelta",
@@ -502,6 +559,7 @@ __all__ = [
     "ProfileResult",
     "ProfileStat",
     "compare_profile_results",
+    "generate_comparison_report",
     "generate_flame_graph",
     "identify_bottlenecks",
     "memory_profile",
