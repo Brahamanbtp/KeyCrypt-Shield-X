@@ -459,7 +459,11 @@ def _require_load_test_opt_in() -> None:
 
 @pytest.fixture(scope="module")
 def _load_test_dependencies() -> tuple[Any, Any]:
-    locust_module = pytest.importorskip("locust", reason="locust is required for load testing")
+    try:
+        locust_module = __import__("locust")
+    except Exception as exc:
+        pytest.skip(f"locust is required for load testing but could not be imported: {exc}")
+
     psutil_module = pytest.importorskip("psutil", reason="psutil is required for resource monitoring")
     return locust_module, psutil_module
 
