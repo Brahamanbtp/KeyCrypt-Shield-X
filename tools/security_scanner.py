@@ -20,6 +20,7 @@ import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, List, Mapping
 
@@ -1015,11 +1016,98 @@ def scan_dependencies_for_cves(requirements_file: Path) -> List[CVE]:
     return ordered
 
 
+def generate_security_audit_report(source_dir: Path, requirements_file: Path | None = None) -> str:
+    """Generate a Markdown audit report for source and dependency security findings."""
+    resolved_source = Path(source_dir).expanduser().resolve()
+    secrets = scan_for_hardcoded_secrets(resolved_source)
+    sql_findings = scan_for_sql_injection(resolved_source)
+    command_findings = scan_for_command_injection(resolved_source)
+    cves = scan_dependencies_for_cves(requirements_file) if requirements_file is not None else []
+
+    severity_counts = Counter(
+        [
+            *(item.severity for item in secrets),
+            *(item.severity for item in sql_findings),
+            *(item.severity for item in command_findings),
+            *(item.severity for item in cves),
+        ]
+    )
+
+    def _format_items(items: list[Any], *, empty_message: str) -> str:
+        if not items:
+            return f"- {empty_message}"
+
+        lines: list[str] = []
+        for item in items[:25]:
+            if isinstance(item, SecretLeak):
+                lines.append(
+                    f"- {item.file_path}:{item.line_no} {item.secret_type} "
+                    f"severity={item.severity} cvss={item.cvss_score:.1f}"
+                )
+            elif isinstance(item, SQLInjection):
+                lines.append(
+                    f"- {item.file_path}:{item.line_no} SQL injection severity={item.severity} "
+                    f"cvss={item.cvss_score:.1f}"
+                )
+            elif isinstance(item, CommandInjection):
+                lines.append(
+                    f"- {item.file_path}:{item.line_no} command injection severity={item.severity} "
+                    f"cvss={item.cvss_score:.1f}"
+                )
+            else:
+                cve_item = item
+                lines.append(
+                    f"- {cve_item.package} {cve_item.installed_version} {cve_item.cve_id} "
+                    f"severity={cve_item.severity} cvss={cve_item.cvss_score:.1f}"
+                )
+
+        if len(items) > 25:
+            lines.append(f"- ... and {len(items) - 25} more")
+
+        return "\n".join(lines)
+
+    report = [
+        "# Security Audit Report",
+        "",
+        f"Source directory: {resolved_source}",
+        f"Requirements file: {Path(requirements_file).expanduser().resolve() if requirements_file is not None else 'not provided'}",
+        "",
+        "## Summary",
+        f"- Hardcoded secrets: {len(secrets)}",
+        f"- SQL injection findings: {len(sql_findings)}",
+        f"- Command injection findings: {len(command_findings)}",
+        f"- Dependency CVEs: {len(cves)}",
+        f"- Critical findings: {severity_counts.get('critical', 0)}",
+        f"- High findings: {severity_counts.get('high', 0)}",
+        f"- Medium findings: {severity_counts.get('medium', 0)}",
+        f"- Low findings: {severity_counts.get('low', 0)}",
+        "",
+        "## Hardcoded Secrets",
+        _format_items(secrets, empty_message="None detected"),
+        "",
+        "## SQL Injection",
+        _format_items(sql_findings, empty_message="None detected"),
+        "",
+        "## Command Injection",
+        _format_items(command_findings, empty_message="None detected"),
+    ]
+
+    if requirements_file is not None:
+        report.extend([
+            "",
+            "## Dependency CVEs",
+            _format_items(cves, empty_message="None detected"),
+        ])
+
+    return "\n".join(report).strip() + "\n"
+
+
 __all__ = [
     "CVE",
     "CommandInjection",
     "SQLInjection",
     "SecretLeak",
+    "generate_security_audit_report",
     "is_fake_secret",
     "scan_dependencies_for_cves",
     "scan_for_command_injection",
