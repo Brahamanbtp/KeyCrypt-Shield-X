@@ -1,0 +1,146 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "keycrypt-overview",
+    "title": "KeyCrypt - Operational Dashboard",
+    "tags": ["keycrypt", "ops", "security"],
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "15s",
+    "time": { "from": "now-6h", "to": "now" },
+    "panels": [
+      {
+        "type": "timeseries",
+        "title": "Overview: Encryption Rate",
+        "id": 1,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum(rate(app_encrypt_operations_total[1m]))", "refId": "A" } ],
+        "links": [ { "title": "Details", "url": "#/dashboard/file/keycrypt-details.json" } ]
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Overview: Throughput (MB/s)",
+        "id": 2,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum(rate(app_bytes_processed_total[1m])) / 1024 / 1024", "refId": "A" } ],
+        "fieldConfig": { "defaults": { "unit": "dataRateBps" } }
+      },
+
+      {
+        "type": "stat",
+        "title": "Active Users",
+        "id": 3,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum(app_active_users)", "refId": "A" } ],
+        "options": { "orientation": "auto" }
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Latency Percentiles (p50/p95/p99)",
+        "id": 10,
+        "datasource": "Prometheus",
+        "targets": [
+          { "expr": "histogram_quantile(0.50, sum(rate(request_duration_seconds_bucket[5m])) by (le))", "refId": "A" },
+          { "expr": "histogram_quantile(0.95, sum(rate(request_duration_seconds_bucket[5m])) by (le))", "refId": "B" },
+          { "expr": "histogram_quantile(0.99, sum(rate(request_duration_seconds_bucket[5m])) by (le))", "refId": "C" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "s" } },
+        "links": [ { "title": "Trace View", "url": "#/explore" } ]
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Errors: Error Rate",
+        "id": 20,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum(rate(app_http_errors_total[5m])) / sum(rate(app_http_requests_total[5m]))", "refId": "A" } ],
+        "fieldConfig": { "defaults": { "unit": "percent" } }
+      },
+
+      {
+        "type": "table",
+        "title": "Errors by Type",
+        "id": 21,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "topk(50, sum by (error_type)(rate(app_http_errors_total[5m])))", "refId": "A" } ]
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Security: Security State Timeline",
+        "id": 30,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "security_state", "refId": "A" } ],
+        "annotations": { "list": [] }
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Authentication Failures",
+        "id": 31,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "increase(auth_failed_total[5m])", "refId": "A" } ]
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Resources: CPU Usage (cluster)",
+        "id": 40,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) by (instance)", "refId": "A" } ],
+        "fieldConfig": { "defaults": { "unit": "percent" } }
+      },
+
+      {
+        "type": "timeseries",
+        "title": "Resources: Memory Usage",
+        "id": 41,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "(sum(node_memory_MemTotal_bytes) - sum(node_memory_MemAvailable_bytes)) / sum(node_memory_MemTotal_bytes)", "refId": "A" } ],
+        "fieldConfig": { "defaults": { "unit": "percent" } }
+      },
+
+      {
+        "type": "stat",
+        "title": "Keys: Active Keys",
+        "id": 50,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "count(active_keys)", "refId": "A" } ]
+      },
+
+      {
+        "type": "table",
+        "title": "Keys: Rotation Schedule",
+        "id": 51,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "key_age_seconds", "refId": "A" } ]
+      },
+
+      {
+        "type": "piechart",
+        "title": "Providers: Usage Distribution",
+        "id": 60,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "sum by(provider) (rate(provider_operations_total[5m]))", "refId": "A" } ]
+      },
+
+      {
+        "type": "table",
+        "title": "Audit: Recent Security Events",
+        "id": 70,
+        "datasource": "Prometheus",
+        "targets": [ { "expr": "topk(50, increase(audit_events_total[1h]))", "refId": "A" } ]
+      }
+    ],
+    "templating": {
+      "list": [
+        { "name": "namespace", "type": "query", "query": "label_values(kube_namespace_labels, namespace)", "label": "Namespace" }
+      ]
+    },
+    "timepicker": { "refresh_intervals": ["5s","10s","30s","1m","5m","15m"] }
+  },
+  "overwrite": false
+}
