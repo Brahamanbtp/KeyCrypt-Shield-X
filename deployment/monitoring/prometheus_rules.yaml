@@ -1,0 +1,92 @@
+groups:
+  - name: keycrypt.rules
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (sum(rate(app_http_errors_total[5m]))
+            / sum(rate(app_http_requests_total[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected for KeyCrypt (>{{ $value }} )"
+          description: "Error rate > 5% sustained for 5 minutes across the service. Investigate recent deploys, downstream failures, or capacity issues."
+          runbook_url: "https://example.com/runbooks/high_error_rate"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "P95 latency high (>500ms) for KeyCrypt"
+          description: "95th percentile request latency exceeds 500ms for 5 minutes. Check service latency, downstream calls, and CPU saturation."
+          runbook_url: "https://example.com/runbooks/high_latency"
+
+      - alert: KeyRotationOverdue
+        expr: |
+          max_over_time(key_age_seconds[24h]) > (90 * 24 * 3600)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Key rotation overdue (>90 days)"
+          description: "One or more data keys have age greater than 90 days. Schedule rotation per policy."
+          runbook_url: "https://example.com/runbooks/key_rotation"
+
+      - alert: LowThroughput
+        expr: |
+          sum(rate(app_bytes_processed_total[5m])) < 104857600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low throughput detected (<100 MB/s)"
+          description: "Aggregate throughput below 100 MB/s for 10 minutes. This may indicate upstream slowness or reduced load."
+          runbook_url: "https://example.com/runbooks/throughput"
+
+      - alert: MemoryPressure
+        expr: |
+          (sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) < 0.10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory pressure on cluster (>90% used)"
+          description: "Available memory below 10% across nodes. Investigate pods with high memory usage and consider scaling."
+          runbook_url: "https://example.com/runbooks/memory_pressure"
+
+      - alert: DiskSpaceLow
+        expr: |
+          (sum(node_filesystem_avail_bytes{mountpoint!~"/boot"})
+            / sum(node_filesystem_size_bytes{mountpoint!~"/boot"})) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk space on cluster (<10% free)"
+          description: "Less than 10% disk available on filesystem(s). Clean up logs, increase volume size, or add nodes."
+          runbook_url: "https://example.com/runbooks/disk_space"
+
+      - alert: SecurityStateElevated
+        expr: |
+          sum(security_state{severity="CRITICAL"}) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Security state elevated: critical findings detected"
+          description: "One or more critical security findings are present. Follow incident response procedures immediately."
+          runbook_url: "https://example.com/runbooks/security_incident"
+
+      - alert: AuthenticationFailures
+        expr: |
+          increase(auth_failed_total[1m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spike in authentication failures (>10 in 1m)"
+          description: "Rate of failed authentications exceeded threshold. Could indicate misconfiguration or brute-force attempts."
+          runbook_url: "https://example.com/runbooks/auth_failures"
