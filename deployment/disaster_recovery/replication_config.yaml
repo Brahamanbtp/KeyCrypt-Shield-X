@@ -1,0 +1,130 @@
+# Cross-region replication and failover configuration for KeyCrypt
+# Primary: us-east-1
+# Secondary (DR): us-west-2
+# Tertiary (multi-geo): eu-west-1
+
+regions:
+  primary: us-east-1
+  secondary: us-west-2
+  tertiary: eu-west-1
+
+postgresql:
+  replication_mode: streaming
+  streaming:
+    synchronous: false            # async streaming replication (low RPO, higher potential data loss)
+    replication_user: repl_user
+    replication_password_secret: /secrets/replication_password  # operator: replace with secret path or provider reference
+    replication_slot_prefix: keycrypt_slot_
+    wal_level: replica
+    max_wal_senders: 10
+    wal_keep_size_mb: 1024
+    primary_conninfo_template: "host={host} port={port} user=repl_user password={{password}} application_name={instance}"
+    promotion:
+      approach: trigger_file     # options: trigger_file | repmgr | patroni | manual
+      trigger_file_path: /var/lib/postgresql/trigger_promote
+    bootstrapping:
+      basebackup_tool: pg_basebackup
+      basebackup_opts: -X stream -c fast
+      wal_fetcher: wal-g        # optional: wal-e / wal-g / custom
+
+s3:
+  cross_region_replication:
+    enabled: true
+    versioning_required: true
+    rules:
+      - id: keycrypt-replicate-objects
+        status: Enabled
+        prefix: ""
+        destination_bucket: arn:aws:s3:::keycrypt-backups-us-west-2
+        destination_storage_class: STANDARD
+        role: arn:aws:iam::123456789012:role/s3-replication-role  # replace with real role ARN
+    notes: |
+      Ensure source bucket has Versioning=Enabled and an IAM role allowing s3:ReplicateObject, s3:ReplicateDelete,
+      s3:ReplicateTags and s3:GetObjectVersion for the replication role.
+
+redis:
+  sentinel:
+    master_name: keycrypt-master
+    replicas_per_region: 2
+    quorum: 2
+    down_after_milliseconds: 30000
+    failover_timeout: 180000
+    parallel_syncs: 1
+    automatic_failback: false
+    replication_strategy: async
+    notes: |
+      Deploy Redis primary in primary region, replicas across secondary/tertiary. Use Sentinel deployed in
+      at least 3 availability zones per region to avoid split-brain. Configure security groups and
+      network peering/VPN between regions for replication traffic.
+
+kms:
+  multi_region_keys:
+    enabled: true
+    keys:
+      - region: us-east-1
+        alias: alias/keycrypt-primary
+        key_id: REPLACE_WITH_KEY_ID_US_EAST_1
+      - region: us-west-2
+        alias: alias/keycrypt-dr
+        key_id: REPLACE_WITH_KEY_ID_US_WEST_2
+      - region: eu-west-1
+        alias: alias/keycrypt-eu
+        key_id: REPLACE_WITH_KEY_ID_EU_WEST_1
+    best_practice: |
+      Use AWS multi-Region keys or cross-region key replication where supported. Keep key material protected
+      and use least-privilege policies for KMS usage. Enable automatic rotation where acceptable.
+
+failover:
+  health_check:
+    interval_seconds: 30
+    failure_threshold: 3           # consecutive failed checks before marking unhealthy
+    check_probes:
+      - type: http
+        path: /healthz
+        port: 8080
+        expected_status: 200
+      - type: tcp
+        port: 5432                  # postgres
+      - type: redis_ping
+        port: 6379
+  automatic_failback: false       # disable automatic failback; require manual approval
+  failover_method: staged         # options: immediate | staged | manual
+  operator_approval_required: true
+  rto_target_seconds: 1800       # example RTO target (30 minutes)
+  rpo_target_seconds: 300        # example RPO target (5 minutes)
+
+network:
+  inter_region:
+    monitor_latency: true
+    probes:
+      - name: us-east1->us-west2
+        from: us-east-1
+        to: us-west-2
+        method: icmp
+        threshold_ms: 120
+      - name: us-east1->eu-west1
+        from: us-east-1
+        to: eu-west-1
+        method: http_ping
+        path: /ping
+        threshold_ms: 200
+    prometheus_blackbox_exporter:
+      enabled: true
+      job_name: inter-region-latency
+      scrape_interval: 30s
+      module: http_2xx
+      labels:
+        role: inter-region-monitor
+    alerting:
+      - name: HighInterRegionLatency
+        expr: |
+          increase(probe_successful{job="inter-region-latency"}[2m]) < 1 or
+          probe_duration_seconds_bucket{job="inter-region-latency"} > 0.2
+        for: 2m
+        severity: warning
+
+notes:
+  - "This document is a configuration template. Replace placeholders (ARNs, key IDs, secrets) with real values."
+  - "PostgreSQL async streaming replication gives low RPO but may lose in-flight transactions — choose synchronous if zero-loss is required."
+  - "S3 cross-region replication requires bucket versioning and an IAM role. Test replication with sample objects."
+  - "Ensure network egress rules and cross-region bandwidth are sufficient; consider using AWS Global Accelerator or Transit Gateway for improved latency."
