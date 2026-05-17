@@ -1,0 +1,139 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycrypt-default-deny
+  namespace: keycrypt
+  labels:
+    app: keycrypt
+spec:
+  podSelector:
+    matchLabels:
+      app: keycrypt
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow ingress from the ingress controller (port 8000) and Prometheus scraping (port 9090)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycrypt-allow-ingress
+  namespace: keycrypt
+spec:
+  podSelector:
+    matchLabels:
+      app: keycrypt
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Ingress controller namespace/selector; adjust labels to match your cluster
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        # Prometheus server scrapes metrics from application (adjust namespace/labels)
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+
+---
+# Allow egress to PostgreSQL, Redis, KMS endpoints (HTTPS), DNS, and Prometheus (push/remote-write)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycrypt-allow-egress
+  namespace: keycrypt
+spec:
+  podSelector:
+    matchLabels:
+      app: keycrypt
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: databases
+          podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: cache
+          podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        # Allow outbound HTTPS to KMS/HSM endpoints (CIDR may be tightened to provider ranges)
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        # DNS service (kube-dns) typically in kube-system namespace
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        # Allow egress to monitoring namespace (pushgateway/remote-write)
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+
+---
+# Namespace isolation example: ensure other namespaces cannot reach keycrypt pods unless allowed
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycrypt-namespace-isolation
+  namespace: keycrypt
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # allow from same namespace only; other namespaces blocked unless explicit policies exist
+        - podSelector: {}
+
+# NOTES:
+# - Adjust namespaceSelector matchLabels to align with your cluster's namespace labels (e.g., 'name: ingress-nginx').
+# - The default-deny policy blocks all ingress/egress; the allow policies above explicitly permit necessary traffic.
+# - The ipBlock for KMS is broad (0.0.0.0/0) for HTTPS; in production restrict to your KMS provider CIDRs or VPC egress rules.
+# - Prometheus scraping requires the ingress allow rule for port 9090 (or the app metrics port you expose).
