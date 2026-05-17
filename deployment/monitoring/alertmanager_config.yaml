@@ -1,0 +1,86 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: 'slack-alerts'
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: 'critical'
+      receiver: 'pagerduty'
+      continue: false
+
+    - match_re:
+        alertname: 'Security.*|.*Security.*'
+      receiver: 'security-email-pagerduty'
+      continue: false
+
+    - match:
+        severity: 'warning'
+      receiver: 'slack-alerts'
+      continue: false
+
+    - match:
+        compliance: 'true'
+      receiver: 'compliance-email'
+      continue: false
+
+    # Environment/namespace specific routing example
+    - match:
+        namespace: 'production'
+      receiver: 'pagerduty'
+      continue: false
+
+receivers:
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - routing_key: 'PAGERDUTY_INTEGRATION_KEY_PLACEHOLDER'
+        severity: '{{ .CommonLabels.severity }}'
+        details:
+          summary: '{{ .CommonAnnotations.summary }}'
+
+  - name: 'slack-alerts'
+    slack_configs:
+      - api_url: ${SLACK_WEBHOOK_URL}
+        channel: '#alerts'
+        title: '{{ .CommonAnnotations.summary }}'
+        text: '{{ range .Alerts }}*{{ .Labels.alertname }}* - {{ .Annotations.description }}\n{{ end }}'
+
+  - name: 'security-email-pagerduty'
+    email_configs:
+      - to: 'security-team@example.com'
+        from: 'alertmanager@example.com'
+        send_resolved: true
+    pagerduty_configs:
+      - routing_key: 'PAGERDUTY_SECURITY_KEY'
+
+  - name: 'compliance-email'
+    email_configs:
+      - to: 'compliance-team@example.com'
+        from: 'alertmanager@example.com'
+        send_resolved: true
+
+  - name: 'default-email'
+    email_configs:
+      - to: 'oncall@example.com'
+        from: 'alertmanager@example.com'
+        send_resolved: true
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'namespace']
+
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'info'
+    equal: ['alertname', 'namespace']
+
+# Silence/resolution templates and receivers can be extended with webhook/email/pagerduty settings.
+# Replace placeholder keys/URLs/emails with your real integration endpoints before deploying.
