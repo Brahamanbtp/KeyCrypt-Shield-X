@@ -1,0 +1,174 @@
+ # Security baseline for production environments — hardened defaults and mappings
+metadata:
+  name: keycrypt-production-security-baseline
+  version: 1.0
+  last_updated: 2026-05-18
+  owner: Security / Platform
+
+summary: |
+  This baseline documents required security controls for production deployments of KeyCrypt.
+  It mandates network/TLS settings, authentication/authorization, encryption standards, key
+  management requirements, logging/audit policies, secrets handling, container hardening,
+  dependency vulnerability SLAs, and compliance mappings to NIST 800-53 and CIS benchmarks.
+
+controls:
+  network:
+    description: Enforce encrypted transport and deny plaintext protocols.
+    requirements:
+      - Require TLS 1.3 only for all external and internal traffic.
+      - Disable TLS 1.2 and earlier; disable weak ciphers and renegotiation.
+      - Enforce HTTP->HTTPS redirect and HSTS for public endpoints.
+      - Use mTLS for internal service-to-service communication where feasible.
+    enforcement:
+      - Ingress controllers: TLS 1.3-only annotations / configuration.
+      - Service mesh: enforce TLS mTLS policies and auto-mutate sidecars.
+      - NetworkPolicies: default deny; allow only required ports/protocols.
+
+  authentication:
+    description: Strong authentication for users and services.
+    requirements:
+      - Service auth: mTLS for services; JWTs for API clients with short TTLs.
+      - User auth: SSO + enforce 2FA for all admin/privileged accounts.
+      - Rotate service credentials on automated schedule; prefer short-lived tokens.
+    enforcement:
+      - OIDC integration for web UI and APIs; RBAC driven by groups/claims.
+      - Audit logging for all auth attempts and token issuance.
+
+  authorization:
+    description: Least-privilege access control.
+    requirements:
+      - RBAC for all control planes (k8s, cloud IAM, provider consoles).
+      - No permanent wide-scope roles; use just-in-time elevation for admin tasks.
+      - Access reviews every 30 days for privileged roles.
+    enforcement:
+      - Use policy-as-code (OPA/Gatekeeper) to prevent overly-broad role creation.
+
+  encryption:
+    description: Data protection at rest and in transit.
+    requirements:
+      - Minimum symmetric encryption: AES-256-GCM for data at rest.
+      - Prefer Hybrid PQC (post-quantum + classical) for keys/signatures where available.
+      - All backups must be encrypted and integrity-checked; private key material stored only in HSM.
+    enforcement:
+      - KMS/HSM integration for key wrapping; disallow exporting root key material.
+
+  key_management:
+    description: HSM-backed keys and rotation.
+    requirements:
+      - Production root and data-encryption keys must reside in HSM or cloud KMS with HSM guarantees.
+      - Key rotation policy: rotate keys every 90 days (automated where safe).
+      - Maintain key usage audit trail and separate roles for key admins and key users.
+    enforcement:
+      - Integrate with cloud HSM / AWS CloudHSM / Azure Key Vault Managed HSM / Vault HSM plugin.
+
+  logging_and_audit:
+    description: Immutable, comprehensive audit trail for security events.
+    requirements:
+      - Log all authentication, authorization, key operations, configuration changes, and admin actions.
+      - Store audit logs in immutable/append-only stores (WORM S3, write-once audit DB) and sign logs.
+      - Retain security audit logs per retention policy (e.g., 1 year hot, 7 years cold) per compliance.
+    enforcement:
+      - Forward audit stream to dedicated audit cluster (Elasticsearch / WORM storage) and enable object lock for S3.
+
+  secrets_management:
+    description: Centralized secrets handling; avoid env secrets.
+    requirements:
+      - No production secrets in plain environment variables, code, or checked-in files.
+      - Use a secrets manager (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) with strict ACLs and leasing.
+      - Secrets must be obtained via secure sidecar or CSI driver at runtime and never persisted to container image.
+    enforcement:
+      - CI pipeline policy to fail on env var secrets in manifests; admission webhook to deny pods with plaintext secrets.
+
+  container_security:
+    description: Container runtime hardening.
+    requirements:
+      - Containers must run as non-root user with a numeric UID and GID.
+      - Filesystems should be read-only unless write access is required for specific mount points.
+      - No containers run in privileged mode or with SYS_ADMIN capabilities.
+      - Limit capabilities to minimal set; use seccomp and AppArmor profiles.
+    enforcement:
+      - PodSecurity admission (or OPA/Gatekeeper) rules to deny privileged or root containers.
+
+  dependencies_and_vulnerability_management:
+    description: Automated scanning and patching SLAs.
+    requirements:
+      - Automated CVE scanning of container images and dependencies on every PR and on a schedule.
+      - Critical/High vulnerabilities must be triaged and patched within 7 days (or mitigated if patch unavailable).
+      - Use SBOMs and software composition analysis (SCA) for transitive dependency visibility.
+    enforcement:
+      - CI block on high-severity findings; scheduled dependency refresh job; integrate Dependabot/OSV/Snyk/Trivy as appropriate.
+
+implementation_examples:
+  tls_configuration:
+    nginx_ingress:
+      annotations:
+        nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.3"
+        nginx.ingress.kubernetes.io/ssl-prefer-server-ciphers: "true"
+        nginx.ingress.kubernetes.io/ssl-ciphers: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+
+  mtls_and_jwt:
+    service_mesh: Istio or Linkerd recommended; enable mTLS STRICT mode and JWT claim validation for APIs.
+
+  secrets:
+    kubernetes_csi_vault:
+      description: Use a CSI driver to mount secrets at runtime from Vault.
+
+  hsm_example:
+    aws_cloudhsm: |
+      Use CloudHSM-backed custom key store for KMS keys that must be non-exportable.
+
+  cve_scanning:
+    ci_tools: ["trivy", "snyk", "dependabot", "osv-scanner"]
+    schedule: daily
+
+compliance_mappings:
+  nist_800_53:
+    AC: "Access Control (RBAC, least privilege, 30-day reviews)"
+    IA: "Identification and Authentication (mTLS, JWT, 2FA)"
+    SC: "System and Communications Protection (TLS1.3, encryption in transit)"
+    SC-13: "Cryptographic Protection (AES-256-GCM, HSM)"
+    AU: "Audit and Accountability (immutable logs, retention policies)"
+    CP: "Contingency Planning (backups, DR runbooks)"
+
+  cis_k8s_benchmarks:
+    - "Ensure that the --tls-cert-file and --tls-private-key-file are configured"
+    - "Ensure that admission control plugin PodSecurity or equivalent is enabled"
+    - "Ensure container runtime is configured to use user namespaces / non-root containers"
+
+monitoring_and_alerting:
+  indicators:
+    - name: TLS Downgrade Attempts
+      trigger: Unusual TLS version or cipher usage detected
+      severity: critical
+    - name: Key Rotation Failure
+      trigger: Key rotation job failures or HSM errors
+      severity: high
+    - name: Secret Leak Detection
+      trigger: CI or runtime detection of plain-text secrets
+      severity: high
+
+operational_runbook:
+  - name: Detect
+    steps:
+      - Check alerts and incident ticketing for severity and affected systems.
+      - Identify whether the incident is confidentiality, integrity, or availability.
+  - name: Contain
+    steps:
+      - Isolate affected services by applying NetworkPolicy and scaling replicas to zero.
+      - Rotate affected credentials immediately via KMS/HSM-backed rotation.
+  - name: Eradicate
+    steps:
+      - Patch vulnerable images and redeploy using CI with enforced SBOM verification.
+      - Rebuild images from known-good sources and scan before promoting.
+  - name: Recover
+    steps:
+      - Restore from verified backups using `deployment/backup/backup_strategy.py`.
+      - Validate restored system using `deployment/disaster_recovery/restore_procedure.py`.
+  - name: Post-incident
+    steps:
+      - Conduct RCA, update runbook, and schedule access reviews.
+
+notes:
+  - "Secrets must be provisioned via Secrets Manager; use short-lived credentials where possible."
+  - "Automatic failback is disabled by baseline; require manual approval to avoid flapping."
+  - "PQC adoption: begin hybrid deployments for signatures and key encapsulation, monitor vendor readiness."
