@@ -374,7 +374,7 @@ class ComplianceFramework:
         )
 
 
-DEFAULT_FRAMEWORK = ComplianceFramework()
+DEFAULT_FRAMEWORK: ComplianceFramework | None = None
 
 
 def validate_compliance(operation: Operation, standard: ComplianceStandard) -> ComplianceResult:
@@ -786,6 +786,9 @@ def _pci_dss_requirements() -> list[ComplianceRequirement]:
             remediation="Rotate PCI keys within 60 days.",
         ),
     ]
+
+
+DEFAULT_FRAMEWORK = ComplianceFramework(standards=[HIPAAStandard(), GDPRStandard(), SOC2Standard(), PCIDSSStandard()])
 
 
 __all__ = [
